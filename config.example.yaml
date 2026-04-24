@@ -1,0 +1,35 @@
+router:
+  host: 0.0.0.0
+  port: 8080
+  log_level: INFO
+
+edge_llm:
+  base_url: http://localhost:18080/v1
+  api_key_env: EDGE_LLM_API_KEY
+  model: gemma4-4b
+  request_timeout_s: 15
+
+cloud_llm:
+  base_url: http://127.0.0.1:4000/v1
+  api_key_env: CLOUD_LLM_API_KEY
+  model: claude-opus-4-7
+  request_timeout_s: 60
+
+classifier:
+  confidence_threshold: 0.6
+  fallback: heavy
+  system_prompt: |
+    You are a task complexity classifier. Classify the user request as either
+    "light" (answerable by a local small model in under 2s) or "heavy"
+    (needs a frontier cloud model). Respond with JSON only:
+    {"task_type": "<qa|code|chat|reasoning|other>",
+     "complexity": "light|heavy",
+     "confidence": 0.0-1.0}
+
+privacy:
+  mask_map_ttl_s: 3600
+  mask_enabled: true
+
+telemetry:
+  enabled: true
+  service_name: gemma4-router
