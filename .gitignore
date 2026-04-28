@@ -31,3 +31,10 @@ htmlcov/
 
 # uv
 uv.lock
+
+# V1.5 model artefacts and runs
+*.pt
+*.bin
+*.safetensors
+wandb/
+outputs/
