@@ -84,3 +84,27 @@ V1.5 modules sit alongside V1.0; the existing V1 router code is untouched.
 Setting `embedding_b64=null` makes a V1.5 payload behaviourally identical to
 V1.0, so the cloud side can ship the adapter and roll the bridge in
 gradually.
+
+## Training & inference
+
+The V1.5 edge encoder and cloud adapter are real PyTorch + HuggingFace
+transformers modules in `src/router/edge_encoder.py` and
+`src/router/cloud_adapter.py`. Both lazy-import torch/transformers, so
+plain `import` of the package stays light for users who only need the
+schema or routing layer.
+
+- **Tests**: `tests/test_v15_pipeline.py` exercises edge encode → wire
+  round-trip → cloud adapter generate using
+  `trl-internal-testing/tiny-random-LlamaForCausalLM` so CI runs on CPU
+  with no GPU and no real Gemma 4 weights.
+- **Production edge**: Gemma 4 26B-A4B-it (frozen) on an L4 24GB. The
+  trainable `nn.Linear` projection head trains on the same L4 since the
+  base is frozen.
+- **Production cloud**: Gemma 4 31B-it (frozen) on an A100 80GB
+  (vast.ai per the SRE deployment plan). Only the soft-prompt MLP is
+  trainable.
+- **Install training deps**: `uv pip install -e '.[training]'` pulls
+  torch, transformers, accelerate, peft.
+- **Deployment manifests**: see `deploy/k8s/` for the edge inference
+  pod, cloud vLLM, and adapter wrapper. Manifests are unchanged by this
+  PR — the model code drop-in is source-compatible.

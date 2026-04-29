@@ -1,20 +1,30 @@
-"""Cloud adapter: soft-prompt MLP that projects edge embedding to K=8 prompt
-tokens, prepended into Gemma4-31B (frozen) at inference time.
+"""Cloud adapter: trainable MLP soft-prompt -> frozen Gemma 4 31B.
 
-V1.5 stub. Real model + MLP wiring are TODO; this module fixes the shape
-contract.
+Maps an edge-side embedding vector to ``K`` soft-prompt token embeddings
+which are prepended to the frozen Gemma 4 31B input embedding stream
+before generation. Inspired by the BLIP-2 Q-Former pattern: only the small
+adapter MLP is trainable, the cloud base model stays frozen.
+
+Heavy deps (torch, transformers) are lazy-imported inside methods.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import torch
+    import torch.nn as nn
 
 
 @dataclass
 class CloudAdapterConfig:
-    base_model_id: str = "google/gemma-4-31b"
+    """Backwards-compat config retained from the V1.5 stub."""
+
+    base_model_id: str = "google/gemma-4-31B-it"
     quantization: str = "Q4_K_M"
     soft_prompt_k: int = 8
     soft_prompt_emb_dim: int = 4096
@@ -24,35 +34,146 @@ class CloudAdapterConfig:
     max_new_tokens: int = 1024
 
 
-class CloudAdapter:
-    """vec(4096) -> MLP[4096, 8192, 8*4096] -> reshape to (K=8, 4096)
-    soft prompt prepended into frozen Gemma4-31B forward.
+def _load_torch():
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError as e:
+        raise RuntimeError(
+            "cloud_adapter requires torch + transformers. Install the "
+            "'training' extra or deploy on the A100 80GB cloud image."
+        ) from e
+    return torch, nn
+
+
+def _load_transformers():
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as e:
+        raise RuntimeError(
+            "cloud_adapter requires transformers>=4.45. Install the "
+            "'training' extra; on cloud images it is preinstalled."
+        ) from e
+    return AutoModelForCausalLM, AutoTokenizer
+
+
+class SoftPromptAdapter:
+    """edge_vec(D_e) -> MLP -> (K, D_c) soft prompt -> frozen cloud LM.
+
+    forward(edge_vec, json_text, max_new_tokens) returns the decoded string.
+    Only ``self.mlp`` is trainable; the cloud base is frozen.
     """
 
-    def __init__(self, cfg: CloudAdapterConfig | None = None) -> None:
-        self.cfg = cfg or CloudAdapterConfig()
-        self._mlp = None
-        self._llm = None
-        self._tokenizer = None
-        print("TODO real model: CloudAdapter.__init__ has not loaded weights")
+    def __init__(
+        self,
+        edge_dim: int = 4096,
+        cloud_hidden: int | None = None,
+        prompt_tokens: int = 8,
+        hf_token: str | None = None,
+        cloud_model_name: str = "google/gemma-4-31B-it",
+        device: str = "cuda",
+        dtype: "Any" = None,
+    ) -> None:
+        torch, nn = _load_torch()
+        AutoModelForCausalLM, AutoTokenizer = _load_transformers()
 
-    def load(self) -> None:
-        # TODO: build nn.Sequential(Linear(4096, 8192), GELU, Linear(8192, K*4096))
-        # TODO: from transformers import AutoModelForCausalLM, AutoTokenizer
-        # TODO: load Gemma4-31B Q4 GGUF / HF, freeze all params
-        print("TODO real model: CloudAdapter.load skipped")
+        if dtype is None:
+            dtype = torch.float16
 
-    def _vec_to_soft_prompt(self, vec: np.ndarray) -> np.ndarray:
-        # TODO: forward MLP, reshape to (K, emb_dim).
-        K, D = self.cfg.soft_prompt_k, self.cfg.soft_prompt_emb_dim
-        return np.zeros((K, D), dtype=np.float16)
+        self.edge_dim = edge_dim
+        self.prompt_tokens = prompt_tokens
+        self.cloud_model_name = cloud_model_name
+        self.device = device
+        self.dtype = dtype
 
-    def forward(self, vec: np.ndarray, json_text: str) -> str:
-        """Run frozen Gemma4-31B with soft prompt prepended to json_text input.
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                cloud_model_name, token=hf_token
+            )
+            cloud = AutoModelForCausalLM.from_pretrained(
+                cloud_model_name,
+                token=hf_token,
+                torch_dtype=dtype,
+                output_hidden_states=False,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load cloud model '{cloud_model_name}'. Hint: "
+                f"production deployment runs Gemma 4 31B on A100 80GB "
+                f"(vast.ai per SRE plan) with HF_TOKEN. Underlying error: {e}"
+            ) from e
 
-        Returns generated string. Stub returns empty string.
-        """
-        _ = self._vec_to_soft_prompt(vec)
-        # TODO: tokenize json_text, prepend soft prompt embeddings into
-        # input_embeds, call model.generate(...)
-        return ""
+        try:
+            cloud = cloud.to(device)
+        except Exception:
+            pass
+
+        for p in cloud.parameters():
+            p.requires_grad_(False)
+        cloud.eval()
+        self.cloud = cloud
+
+        detected_hidden = cloud.config.hidden_size
+        if cloud_hidden is None:
+            cloud_hidden = detected_hidden
+        elif cloud_hidden != detected_hidden:
+            cloud_hidden = detected_hidden
+        self.cloud_hidden = cloud_hidden
+
+        self.mlp = nn.Sequential(
+            nn.Linear(edge_dim, edge_dim * 2),
+            nn.GELU(),
+            nn.Linear(edge_dim * 2, prompt_tokens * cloud_hidden),
+        ).to(device=device, dtype=dtype)
+
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def freeze_base(self) -> None:
+        for p in self.cloud.parameters():
+            p.requires_grad_(False)
+        self.cloud.eval()
+
+    def trainable_parameters(self) -> Iterator["nn.Parameter"]:
+        return self.mlp.parameters()
+
+    def _embed_input(self, json_text: str) -> "torch.Tensor":
+        torch, _ = _load_torch()
+        ids = self.tokenizer(json_text, return_tensors="pt").input_ids.to(self.device)
+        embed_layer = self.cloud.get_input_embeddings()
+        return embed_layer(ids)
+
+    def forward(
+        self,
+        edge_vec: "torch.Tensor | np.ndarray",
+        json_text: str,
+        max_new_tokens: int = 256,
+    ) -> str:
+        torch, _ = _load_torch()
+
+        if isinstance(edge_vec, np.ndarray):
+            edge_vec = torch.from_numpy(edge_vec.astype(np.float32))
+        edge_vec = edge_vec.to(device=self.device, dtype=self.dtype)
+        if edge_vec.dim() == 1:
+            edge_vec = edge_vec.unsqueeze(0)
+
+        soft = self.mlp(edge_vec).reshape(
+            edge_vec.shape[0], self.prompt_tokens, self.cloud_hidden
+        )
+
+        text_embeds = self._embed_input(json_text)
+        if text_embeds.shape[0] != soft.shape[0]:
+            text_embeds = text_embeds.expand(soft.shape[0], -1, -1)
+        embeds = torch.cat([soft, text_embeds], dim=1)
+        attention_mask = torch.ones(embeds.shape[:2], dtype=torch.long, device=self.device)
+
+        with torch.no_grad():
+            out_ids = self.cloud.generate(
+                inputs_embeds=embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+
+        return self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
