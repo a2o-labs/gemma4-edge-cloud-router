@@ -17,6 +17,7 @@ class Counters:
     total: int = 0
     light: int = 0
     heavy: int = 0
+    v15: int = 0
     classifier_fallback: int = 0
     latency_samples_ms: list[float] = field(default_factory=list)
 
@@ -31,6 +32,8 @@ class Telemetry:
             self._counters.total += 1
             if path == "light":
                 self._counters.light += 1
+            elif path == "v1.5":
+                self._counters.v15 += 1
             else:
                 self._counters.heavy += 1
             if classifier_fell_back:
@@ -45,11 +48,13 @@ class Telemetry:
             c = self._counters
             samples = sorted(c.latency_samples_ms)
             p50 = samples[len(samples) // 2] if samples else 0.0
-            split_ratio = (c.heavy / c.total) if c.total else 0.0
+            v1_total = c.light + c.heavy
+            split_ratio = (c.heavy / v1_total) if v1_total else 0.0
             return {
                 "total": c.total,
                 "light": c.light,
                 "heavy": c.heavy,
+                "v1.5": c.v15,
                 "heavy_ratio": round(split_ratio, 4),
                 "classifier_fallback": c.classifier_fallback,
                 "p50_latency_ms": round(p50, 2),

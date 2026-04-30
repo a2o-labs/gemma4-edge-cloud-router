@@ -17,8 +17,14 @@ from .config import get_settings
 from .decoder import Decoder
 from .edge_executor import EdgeExecutor
 from .encoder import Encoder, MaskMap
-from .schema import RouteRequest, RouteResponse
+from .schema import (
+    RouteRequest,
+    RouteResponse,
+    V15RouteRequest,
+    V15RouteResponse,
+)
 from .telemetry import Telemetry
+from .v15_pipeline import V15Pipeline
 
 log = logging.getLogger("router")
 
@@ -59,7 +65,20 @@ async def lifespan(app: FastAPI):
     app.state.cloud_forwarder = CloudForwarder(settings.cloud)
     app.state.classifier = Classifier(_EdgeChatClient(edge_exec), settings.classifier)
     app.state.telemetry = Telemetry()
-    log.info("router ready — edge=%s cloud=%s", settings.edge.base_url, settings.cloud.base_url)
+
+    v15_pipeline = V15Pipeline(settings.v15)
+    try:
+        v15_pipeline.load()
+    except Exception as e:
+        log.warning("V1.5 pipeline load failed (continuing in V1-only mode): %s", e)
+    app.state.v15_pipeline = v15_pipeline
+
+    log.info(
+        "router ready — edge=%s cloud=%s v1.5=%s",
+        settings.edge.base_url,
+        settings.cloud.base_url,
+        "ready" if v15_pipeline.is_ready() else "off",
+    )
     yield
 
 
@@ -121,6 +140,28 @@ async def route(req: RouteRequest) -> RouteResponse:
         path=complexity,  # type: ignore[arg-type]
         answer=answer,
         classifier_confidence=confidence,
+        latency_ms=round(latency_ms, 2),
+    )
+
+
+@app.post("/route/v15", response_model=V15RouteResponse)
+async def route_v15(req: V15RouteRequest) -> V15RouteResponse:
+    pipeline: V15Pipeline = app.state.v15_pipeline
+    if not pipeline.is_ready():
+        raise HTTPException(status_code=503, detail="V1.5 pipeline disabled or not loaded")
+    start = time.perf_counter()
+    try:
+        schema, answer = pipeline.run(req.prompt)
+    except Exception as exc:
+        log.exception("V1.5 pipeline error")
+        raise HTTPException(status_code=502, detail=f"v1.5 pipeline error: {exc}") from exc
+    latency_ms = (time.perf_counter() - start) * 1000
+    app.state.telemetry.record(path="v1.5", latency_ms=latency_ms, classifier_fell_back=False)
+    return V15RouteResponse(
+        task_id=schema.task_id,
+        answer=answer,
+        embedding_dim=schema.embedding_dim,
+        complexity=schema.complexity,
         latency_ms=round(latency_ms, 2),
     )
 

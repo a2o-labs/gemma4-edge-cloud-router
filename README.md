@@ -108,3 +108,28 @@ schema or routing layer.
 - **Deployment manifests**: see `deploy/k8s/` for the edge inference
   pod, cloud vLLM, and adapter wrapper. Manifests are unchanged by this
   PR — the model code drop-in is source-compatible.
+
+### Calling the V1.5 endpoint
+
+The V1 `/route` endpoint stays unchanged. V1.5 lives under `/route/v15` and
+is gated behind the `V15_ENABLED` flag so it is a no-op when disabled.
+
+```bash
+# Production: real Gemma 4 26B-A4B-it + Gemma 4 31B-it on L4/A100
+export V15_ENABLED=true
+export V15_HF_TOKEN=...
+export V15_DEVICE=cuda
+
+# Local dev / CI: mock mode (no GPU, no HF weights)
+export V15_ENABLED=true
+export V15_MOCK_MODE=true
+export V15_DEVICE=cpu
+
+curl -X POST http://localhost:8080/route/v15 \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "How does photosynthesis work?"}'
+```
+
+Response shape: `{ task_id, path: "v1.5", answer, schema_version: "1.5",
+embedding_dim, complexity, latency_ms }`. When `V15_ENABLED=false` (default)
+or the pipeline failed to load, `/route/v15` returns `503`.

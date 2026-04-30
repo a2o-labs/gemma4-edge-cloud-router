@@ -69,3 +69,18 @@ class RouteResponse(BaseModel):
     answer: str
     classifier_confidence: float | None = None
     latency_ms: float | None = None
+
+
+class V15RouteRequest(BaseModel):
+    prompt: str
+    session_id: str | None = None
+
+
+class V15RouteResponse(BaseModel):
+    task_id: str
+    path: Literal["v1.5"] = "v1.5"
+    answer: str
+    schema_version: str = "1.5"
+    embedding_dim: int
+    complexity: Literal["light", "heavy"]
+    latency_ms: float | None = None

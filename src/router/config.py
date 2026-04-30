@@ -38,12 +38,27 @@ class RouterSettings(BaseSettings):
     mask_map_ttl_seconds: int = Field(default=3600, alias="MASK_MAP_TTL_SECONDS")
 
 
+class V15Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="V15_", env_file=".env", extra="ignore")
+
+    enabled: bool = False
+    edge_model_name: str = "google/gemma-4-26B-A4B-it"
+    cloud_model_name: str = "google/gemma-4-31B-it"
+    embedding_dim: int = 4096
+    prompt_tokens: int = 8
+    device: str = "cuda"
+    hf_token: str | None = None
+    max_new_tokens: int = 256
+    mock_mode: bool = False
+
+
 class Settings:
     def __init__(self) -> None:
         self.router = RouterSettings()
         self.edge = EdgeLLMSettings()
         self.cloud = CloudLLMSettings()
         self.classifier = ClassifierSettings()
+        self.v15 = V15Settings()
 
 
 _settings: Settings | None = None
