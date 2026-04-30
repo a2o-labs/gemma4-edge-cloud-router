@@ -194,3 +194,33 @@ covering qa / code / summarize / translate / reason / chat).
 A locust load test stub for `/route/v15` lives at `eval/locust_v15.py` —
 manual run: `pip install locust && locust -f eval/locust_v15.py --host
 http://localhost:8080`. Not exercised in CI.
+
+### Training V1.5 adapters
+
+The frozen Gemma 4 base models stay fixed; only `EdgeEncoder.projection`
+(`Linear(base_hidden, embedding_dim)`) and `SoftPromptAdapter.mlp`
+(`Linear(edge_dim, edge_dim*2) -> GELU -> Linear(edge_dim*2,
+prompt_tokens*cloud_hidden)`) are trainable (~50M params total at the
+4096/8 V1.5 defaults). BLIP-2 Q-Former pattern.
+
+Mock mode (CI / local dev, no GPU, `tiny-random-LlamaForCausalLM`):
+
+    V15_MOCK_MODE=true python -m training.train_v15 --max-steps 100 --mock-mode
+
+Real mode (L4 GPU, paired data):
+
+    HF_TOKEN=... python -m training.train_v15 \
+        --train-jsonl data/v15/train.jsonl \
+        --max-steps 5000 --batch-size 4 --learning-rate 5e-4 \
+        --device cuda
+
+Checkpoints land in `outputs/v15-train/ckpt-stepN.pt` with the
+`projection` and `mlp` `state_dict`s plus the `TrainConfig` used. The
+final state is also written to `outputs/v15-train/final.pt`. The
+`outputs/` directory is already gitignored.
+
+The trainer is intentionally minimal: AdamW, single-sample SGD steps
+(no grad-accum yet), no `accelerate`/`peft` wrappers. If/when
+distributed or LoRA-style adapters are needed, wrap with `accelerate`
+and add `peft.LoraConfig` against `edge.projection` / `adapter.mlp`
+(both already in the optional `training` extra of `pyproject.toml`).
