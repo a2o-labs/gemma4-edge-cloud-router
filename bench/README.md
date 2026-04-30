@@ -101,6 +101,112 @@ HF_TOKEN=$(cat path/to/hf-token) python bench/v15_l4_smoke.py
 - Add a longer-prompt regression set (currently 5 short prompts, ~1-3
   tokens each post-tokenization).
 
+## 2026-04-30 smoke run
+
+First successful real-weight L4 run.
+
+### Hardware
+
+- Host: `l4-edge-1` (asia-northeast1-b, GCE g2 family)
+- GPU: NVIDIA L4 24GB (driver 550.90.07, CUDA 12.4)
+- Disk pre-run: 12 GB free; post-run unchanged (HF cache ~2 GB for the 1B model + tokenizer)
+
+### Model
+
+`google/gemma-3-1b-it` (~2 GB fp16) — substituted for the spec's
+`google/gemma-3-4b-it` because the L4 disk had only ~7-13 GB free at run
+time and the venv (torch cu124 + transformers) already consumed ~5 GB.
+Code path verified end-to-end on real CUDA weights; the same script with
+`--edge-model google/gemma-3-4b-it --embedding-dim 2048` works once disk
+frees up.
+
+### Results
+
+```
+bench/v15_l4_smoke.py \
+    --edge-model google/gemma-3-1b-it \
+    --cloud-model google/gemma-3-1b-it \
+    --embedding-dim 1024 \
+    --prompt-tokens 4
+```
+
+```json
+{
+  "edge_model": "google/gemma-3-1b-it",
+  "cloud_model": "google/gemma-3-1b-it",
+  "embedding_dim": 1024,
+  "prompt_tokens": 4,
+  "edge_load_ms": 8617.2,
+  "cloud_load_ms": 5781.7,
+  "encode": {
+    "n": 5,
+    "p50": 58.7,
+    "p95": 553.2,
+    "min": 52.8,
+    "max": 553.2
+  },
+  "forward": {
+    "n": 5,
+    "p50": 4042.0,
+    "p95": 4525.4,
+    "min": 3973.1,
+    "max": 4525.4
+  },
+  "cuda_mem_used_gb": 4.14,
+  "cuda_device": "NVIDIA L4",
+  "cuda_total_gb": 23.6
+}
+```
+
+Notes on the numbers:
+
+- `edge_load_ms` reflects a warm HF cache (second attempt). Cold pull
+  from HF was an additional ~30s for the 2 GB safetensors.
+- `encode` p95 is dominated by the first call (553 ms) — CUDA kernel
+  warmup. Subsequent encodes settle at 53-64 ms.
+- `forward` is dominated by `cloud.generate(..., max_new_tokens=64,
+  do_sample=False)`. Roughly 16 tokens/s on L4 fp16 — consistent with
+  Gemma 3 1B at this batch size (1) and prompt length (4 soft + ~50
+  text-embedding tokens from the schema JSON).
+- `cuda_mem_used_gb` = both 1B models + adapter MLP + activations,
+  comfortably inside L4's 24 GB.
+
+### Two pre-existing issues uncovered, both flagged as follow-ups
+
+1. **`EdgeEncoder._tokenize` BatchEncoding-vs-Tensor compat.** With
+   `transformers >= 5.0`, `tokenizer.apply_chat_template(...,
+   return_tensors="pt")` returns a `BatchEncoding`, not a Tensor, which
+   then trips `torch.ones_like(input_ids)` in `_last_hidden`. The smoke
+   run patched this on L4 only with a 2-line guard before
+   `return ids.to(self.device)`:
+
+   ```python
+   if hasattr(ids, "input_ids"):
+       ids = ids.input_ids
+   ```
+
+   This patch is **not** in the PR — it belongs in a separate small
+   router-fix PR against `src/router/edge_encoder.py`.
+
+2. **`pyproject.toml` doesn't pin transformers.** `transformers>=4.45`
+   resolves to 5.7.0 today, which (a) introduced the BatchEncoding
+   change above and (b) is the only version that supports the
+   `gemma3_text` architecture (added in 4.50+). Rolling back to 4.45.2
+   fixes (1) but breaks Gemma 3 loading entirely. Either pin the
+   floor higher (`transformers>=4.50`) or fix (1) — preferably both.
+
+### Caveats
+
+- Both edge and cloud are the same 1 B model on the same GPU.
+  Production split (edge: 4B-26B on L4, cloud: 31B on A100 80GB) isn't
+  exercised yet — A100 (`vast-a100-80g`) still offline.
+- 1 B `hidden_size` is small (1152); `embedding_dim` was lowered to
+  1024 to keep the projection sane. The same script with
+  `--embedding-dim 4096` works on larger models.
+- bitsandbytes 4-bit not yet supported by `EdgeEncoder` /
+  `SoftPromptAdapter` `__init__` — still a follow-up before 26B-A4B
+  fits.
+
 ## judge_ab.py
 
 Pre-existing A/B judge harness from earlier work; unrelated to V1.5.
