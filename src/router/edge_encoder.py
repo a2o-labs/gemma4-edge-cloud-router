@@ -326,6 +326,70 @@ class EdgeEncoder:
         )
 
 
+    def encode_chunked(
+        self,
+        text: str,
+        chunk_size: int = 4096,
+        overlap: int = 256,
+        return_schema: bool = True,
+    ) -> Tuple[list, list]:
+        """Encode a long text by splitting into chunks at token boundaries.
+
+        Args:
+            text: full input text
+            chunk_size: max tokens per chunk
+            overlap: token overlap between chunks for context preservation
+            return_schema: emit a schema per chunk
+
+        Returns:
+            ``(schemas, vecs)`` — both length N where
+            ``N = ceil(total_tokens / (chunk_size - overlap))`` for long texts,
+            or ``N = 1`` for texts that fit in a single chunk.
+
+        Each chunk is run through ``encode()`` so the LRU cache and any
+        instrumentation apply per-chunk; overlapping prefixes between
+        consecutive chunks therefore reuse cached entries when their text
+        slices match exactly.
+        """
+        if overlap >= chunk_size:
+            raise ValueError(
+                f"overlap ({overlap}) must be < chunk_size ({chunk_size})"
+            )
+
+        full_ids = self.tokenizer(text, return_tensors="pt").input_ids[0]
+        total = full_ids.shape[0]
+
+        if total <= chunk_size:
+            schema, vec = self.encode(text, return_schema=return_schema)
+            return [schema], [vec]
+
+        schemas: list = []
+        vecs: list = []
+        step = chunk_size - overlap
+
+        pos = 0
+        while pos < total:
+            end = min(pos + chunk_size, total)
+            chunk_ids = full_ids[pos:end]
+            chunk_text = self.tokenizer.decode(chunk_ids, skip_special_tokens=True)
+            if not chunk_text.strip():
+                if end >= total:
+                    break
+                pos += step
+                continue
+            schema, vec = self.encode(chunk_text, return_schema=return_schema)
+            if return_schema and schema is not None:
+                schema = schema.model_copy(
+                    update={"max_tokens_hint": min(schema.max_tokens_hint, chunk_size)}
+                )
+            schemas.append(schema)
+            vecs.append(vec)
+            if end >= total:
+                break
+            pos += step
+        return schemas, vecs
+
+
 def decode_embedding_from_schema(schema: CompactSchemaV15) -> np.ndarray:
     """Inverse of ``EdgeEncoder.encode``'s base64 packing."""
     if schema.embedding_b64 is None:
