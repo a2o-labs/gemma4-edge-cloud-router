@@ -58,6 +58,13 @@ class _MockAdapter:
     def forward(self, edge_vec: Any, json_text: str, max_new_tokens: int = 256) -> str:
         return f"[mock-v15-response prompt_chars={len(json_text)}]"
 
+    def forward_stream(
+        self, edge_vec: Any, json_text: str, max_new_tokens: int = 256
+    ):
+        canned = f"[mock-v15-stream prompt_chars={len(json_text)}]"
+        for word in canned.split():
+            yield word + " "
+
 
 class V15Pipeline:
     """End-to-end V1.5 orchestrator."""
@@ -118,3 +125,35 @@ class V15Pipeline:
             span.set_attribute("max_new_tokens", self.settings.max_new_tokens)
             span.set_attribute("response_chars", len(response))
         return schema, response
+
+    def run_stream(self, prompt: str):
+        """Generator yielding (event_type, payload) tuples.
+
+        Events:
+            ("schema", CompactSchemaV15)        — emitted once at start
+            ("token", str)                      — emitted per generated token
+            ("done", {"complexity": ..., "total_chars": ...})  — final event
+        """
+        if not self._loaded:
+            raise RuntimeError(
+                "V1.5 pipeline not loaded. Set V15_ENABLED=true and call .load() at startup."
+            )
+        tracer = get_tracer()
+        with tracer.start_as_current_span("v15.stream.encode") as span:
+            schema, vec = self._encoder.encode(prompt, return_schema=True)
+            span.set_attribute("complexity", schema.complexity)
+            span.set_attribute("embedding_dim", schema.embedding_dim)
+
+        yield ("schema", schema)
+
+        json_text = schema.model_dump_json()
+        total_chars = 0
+        with tracer.start_as_current_span("v15.stream.forward") as span:
+            for tok in self._adapter.forward_stream(
+                vec, json_text, max_new_tokens=self.settings.max_new_tokens
+            ):
+                yield ("token", tok)
+                total_chars += len(tok)
+            span.set_attribute("total_chars", total_chars)
+
+        yield ("done", {"complexity": schema.complexity, "total_chars": total_chars})

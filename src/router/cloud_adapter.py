@@ -188,3 +188,56 @@ class SoftPromptAdapter:
             )
 
         return self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
+
+    def forward_stream(
+        self,
+        edge_vec: "torch.Tensor | np.ndarray",
+        json_text: str,
+        max_new_tokens: int = 256,
+    ):
+        """Yield decoded tokens as they're produced by ``cloud.generate``.
+
+        Uses ``transformers.TextIteratorStreamer`` driven from a background
+        thread so the consumer can pull chunks lazily.
+        """
+        import threading
+
+        from transformers import TextIteratorStreamer
+
+        torch, _ = _load_torch()
+
+        if isinstance(edge_vec, np.ndarray):
+            edge_vec = torch.from_numpy(edge_vec.astype(np.float32))
+        edge_vec = edge_vec.to(device=self.device, dtype=self.dtype)
+        if edge_vec.dim() == 1:
+            edge_vec = edge_vec.unsqueeze(0)
+
+        soft = self.mlp(edge_vec).reshape(
+            edge_vec.shape[0], self.prompt_tokens, self.cloud_hidden
+        )
+        text_embeds = self._embed_input(json_text)
+        if text_embeds.shape[0] != soft.shape[0]:
+            text_embeds = text_embeds.expand(soft.shape[0], -1, -1)
+        embeds = torch.cat([soft, text_embeds], dim=1)
+        attention_mask = torch.ones(embeds.shape[:2], dtype=torch.long, device=self.device)
+
+        streamer = TextIteratorStreamer(
+            self.tokenizer, skip_prompt=True, skip_special_tokens=True
+        )
+
+        def _run() -> None:
+            with torch.no_grad():
+                self.cloud.generate(
+                    inputs_embeds=embeds,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    streamer=streamer,
+                )
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        for chunk in streamer:
+            yield chunk
+        thread.join(timeout=1)

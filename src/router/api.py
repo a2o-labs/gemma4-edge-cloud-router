@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from .classifier import Classifier, ChatClient
 from .cloud_forwarder import CloudForwarder
@@ -200,6 +201,41 @@ async def route_v15(req: V15RouteRequest) -> V15RouteResponse:
         complexity=schema.complexity,
         latency_ms=round(latency_ms, 2),
     )
+
+
+@app.post("/route/v15/stream")
+async def route_v15_stream(req: V15RouteRequest) -> StreamingResponse:
+    pipeline: V15Pipeline = app.state.v15_pipeline
+    if not pipeline.is_ready():
+        raise HTTPException(status_code=503, detail="V1.5 pipeline disabled or not loaded")
+
+    async def event_stream():
+        import asyncio
+        import json as _json
+
+        loop = asyncio.get_running_loop()
+        gen = pipeline.run_stream(req.prompt)
+
+        def _next():
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+
+        while True:
+            item = await loop.run_in_executor(None, _next)
+            if item is None:
+                break
+            event_type, payload = item
+            if event_type == "schema":
+                yield f"event: schema\ndata: {payload.model_dump_json()}\n\n"
+            elif event_type == "token":
+                yield f"event: token\ndata: {_json.dumps({'text': payload})}\n\n"
+            elif event_type == "done":
+                yield f"event: done\ndata: {_json.dumps(payload)}\n\n"
+                break
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def run() -> None:
