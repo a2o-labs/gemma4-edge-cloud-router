@@ -1,16 +1,19 @@
 """Input validation + rate-limiting middleware for the router.
 
-Standalone — NOT auto-installed on the FastAPI app. Future PR will
-wire it via app.add_middleware in src/router/api.py.
+Implemented as raw ASGI middleware (not BaseHTTPMiddleware) so the
+request body can be consumed for inspection and then replayed to the
+downstream app cleanly. ``BaseHTTPMiddleware`` does not let us substitute
+the receive callable for downstream consumers, so any approach that
+chains body-reading BaseHTTPMiddleware with StreamingResponse routes
+ends up tripping Starlette's receive-accounting and raising
+``RuntimeError: Unexpected message received: http.request``.
 
-Two layers:
+Three classes exposed:
 
-1. PromptSizeMiddleware — rejects POST /route* requests whose body's
-   `prompt` field is over `max_chars` (default 50_000). Returns 413.
-
-2. RateLimitMiddleware — in-process per-session_id sliding-window rate
-   limiter. session_id is taken from the request body. Default
-   60 req / 60s. Returns 429 with Retry-After.
+- ``PromptSizeMiddleware`` — size-only check (413 on oversized prompt).
+- ``RateLimitMiddleware`` — sliding-window rate limit per ``session_id`` (429).
+- ``CombinedRouteGuard`` — both checks in a single body read; preferred
+  for production wiring.
 """
 
 from __future__ import annotations
@@ -18,71 +21,110 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from typing import Awaitable, Callable
+from typing import Callable
 
-from fastapi import Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 
 _ROUTE_PREFIXES = ("/route",)
 
 
-def _is_route_request(req: Request) -> bool:
-    return req.method == "POST" and any(req.url.path.startswith(p) for p in _ROUTE_PREFIXES)
+def _is_route_request(scope: dict) -> bool:
+    if scope.get("type") != "http":
+        return False
+    if scope.get("method") != "POST":
+        return False
+    path = scope.get("path", "")
+    return any(path.startswith(p) for p in _ROUTE_PREFIXES)
 
 
-async def _read_body_json(req: Request) -> dict:
-    """Read + parse JSON body. Returns {} on parse failure.
+async def _read_body(receive: Callable) -> bytes:
+    """Drain receive into a single bytes payload."""
+    body = b""
+    more_body = True
+    while more_body:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            break
+        if message["type"] != "http.request":
+            continue
+        body += message.get("body", b"")
+        more_body = message.get("more_body", False)
+    return body
 
-    Sets request._body so downstream consumers don't read an empty stream.
+
+def _replay_receive(body: bytes) -> Callable:
+    """Make a receive() that replays ``body`` once then blocks forever.
+
+    Returning ``http.disconnect`` immediately would cause StreamingResponse
+    handlers to short-circuit (Starlette interprets disconnect as 'client
+    closed connection' and cancels the response generator). Instead we
+    block the second-and-later receive() calls indefinitely; the request
+    lifecycle terminates naturally when the response handler returns.
     """
-    body_bytes = await req.body()
+    import asyncio
+
+    sent = False
 
     async def receive():
-        return {"type": "http.request", "body": body_bytes}
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        # Block forever — connection still open until response completes.
+        await asyncio.Event().wait()
+        # Unreachable, but satisfy the type checker.
+        return {"type": "http.disconnect"}
 
-    req._receive = receive  # type: ignore[attr-defined]
-    if not body_bytes:
+    return receive
+
+
+def _parse_json(body: bytes) -> dict:
+    if not body:
         return {}
     try:
-        return json.loads(body_bytes)
+        return json.loads(body)
     except json.JSONDecodeError:
         return {}
 
 
-class PromptSizeMiddleware(BaseHTTPMiddleware):
-    """Reject /route* POSTs whose `prompt` is over max_chars."""
+async def _send_json_response(send: Callable, status: int, content: dict, headers: dict | None = None) -> None:
+    """Send a JSONResponse via the raw ASGI send callable."""
+    response = JSONResponse(status_code=status, content=content, headers=headers or None)
+    await response(
+        {"type": "http", "method": "POST"},  # minimal scope; response only reads status/headers
+        lambda: None,  # type: ignore[arg-type]
+        send,
+    )
+
+
+class PromptSizeMiddleware:
+    """ASGI middleware: rejects /route* POSTs whose ``prompt`` exceeds ``max_chars``."""
 
     def __init__(self, app, max_chars: int = 50_000) -> None:
-        super().__init__(app)
+        self.app = app
         self.max_chars = max_chars
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable],
-    ):
-        if _is_route_request(request):
-            body = await _read_body_json(request)
-            prompt = body.get("prompt", "")
-            if len(prompt) > self.max_chars:
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "detail": (f"prompt too long: {len(prompt)} chars > max {self.max_chars}"),
-                    },
-                )
-        return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        if not _is_route_request(scope):
+            await self.app(scope, receive, send)
+            return
+
+        body = await _read_body(receive)
+        prompt = _parse_json(body).get("prompt", "")
+        if len(prompt) > self.max_chars:
+            await _send_json_response(
+                send,
+                413,
+                {"detail": f"prompt too long: {len(prompt)} chars > max {self.max_chars}"},
+            )
+            return
+
+        await self.app(scope, _replay_receive(body), send)
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """In-process sliding-window rate limit per session_id.
-
-    Default: 60 requests per 60 seconds. session_id is read from JSON
-    body. Anonymous requests (no session_id) share a single bucket
-    keyed on '_anon'.
-    """
+class RateLimitMiddleware:
+    """ASGI middleware: sliding-window rate limit per ``session_id``."""
 
     def __init__(
         self,
@@ -90,13 +132,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         max_requests: int = 60,
         window_seconds: float = 60.0,
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self.max_requests = max_requests
         self.window = window_seconds
         self._buckets: dict[str, deque[float]] = {}
 
     def _check(self, session_id: str) -> tuple[bool, float]:
-        """Return (allowed, retry_after_seconds)."""
         now = time.monotonic()
         bucket = self._buckets.setdefault(session_id, deque())
         while bucket and now - bucket[0] > self.window:
@@ -107,26 +148,84 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         bucket.append(now)
         return True, 0.0
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable],
-    ):
-        if not _is_route_request(request):
-            return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        if not _is_route_request(scope):
+            await self.app(scope, receive, send)
+            return
 
-        body = await _read_body_json(request)
-        session_id = body.get("session_id") or "_anon"
+        body = await _read_body(receive)
+        session_id = _parse_json(body).get("session_id") or "_anon"
 
         allowed, retry_after = self._check(session_id)
         if not allowed:
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "detail": (
-                        f"rate limit: {self.max_requests} req / {self.window:.0f}s exceeded"
-                    ),
-                },
+            await _send_json_response(
+                send,
+                429,
+                {"detail": f"rate limit: {self.max_requests} req / {self.window:.0f}s exceeded"},
                 headers={"Retry-After": f"{retry_after:.1f}"},
             )
-        return await call_next(request)
+            return
+
+        await self.app(scope, _replay_receive(body), send)
+
+
+class CombinedRouteGuard:
+    """Single ASGI middleware: prompt-size + rate-limit in one body read.
+
+    Prefer over stacking PromptSizeMiddleware + RateLimitMiddleware so the
+    body is read once and the replay happens once.
+    """
+
+    def __init__(
+        self,
+        app,
+        max_chars: int = 50_000,
+        max_requests: int = 60,
+        window_seconds: float = 60.0,
+    ) -> None:
+        self.app = app
+        self.max_chars = max_chars
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._buckets: dict[str, deque[float]] = {}
+
+    def _rate_check(self, session_id: str) -> tuple[bool, float]:
+        now = time.monotonic()
+        bucket = self._buckets.setdefault(session_id, deque())
+        while bucket and now - bucket[0] > self.window:
+            bucket.popleft()
+        if len(bucket) >= self.max_requests:
+            retry_after = self.window - (now - bucket[0])
+            return False, max(0.0, retry_after)
+        bucket.append(now)
+        return True, 0.0
+
+    async def __call__(self, scope, receive, send):
+        if not _is_route_request(scope):
+            await self.app(scope, receive, send)
+            return
+
+        body = await _read_body(receive)
+        parsed = _parse_json(body)
+
+        prompt = parsed.get("prompt", "")
+        if len(prompt) > self.max_chars:
+            await _send_json_response(
+                send,
+                413,
+                {"detail": f"prompt too long: {len(prompt)} chars > max {self.max_chars}"},
+            )
+            return
+
+        session_id = parsed.get("session_id") or "_anon"
+        allowed, retry_after = self._rate_check(session_id)
+        if not allowed:
+            await _send_json_response(
+                send,
+                429,
+                {"detail": f"rate limit: {self.max_requests} req / {self.window:.0f}s exceeded"},
+                headers={"Retry-After": f"{retry_after:.1f}"},
+            )
+            return
+
+        await self.app(scope, _replay_receive(body), send)

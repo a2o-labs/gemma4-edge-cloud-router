@@ -19,6 +19,7 @@ from .config import get_settings
 from .decoder import Decoder
 from .edge_executor import EdgeExecutor
 from .encoder import Encoder, MaskMap
+from .middleware import CombinedRouteGuard
 from .schema import (
     RouteRequest,
     RouteResponse,
@@ -101,6 +102,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="gemma4-router", version="0.1.0", lifespan=lifespan)
+
+# Middleware is registered at app build time, before lifespan. We use a
+# single CombinedRouteGuard instead of stacking PromptSizeMiddleware +
+# RateLimitMiddleware so the body is read only once — chained body
+# rewrites break downstream StreamingResponse routes via Starlette's
+# BaseHTTPMiddleware receive-message accounting.
+_mw_settings = get_settings().middleware
+if _mw_settings.enabled:
+    app.add_middleware(
+        CombinedRouteGuard,
+        max_chars=_mw_settings.max_prompt_chars,
+        max_requests=_mw_settings.rate_limit_max_requests,
+        window_seconds=_mw_settings.rate_limit_window_seconds,
+    )
 
 
 @app.get("/health")

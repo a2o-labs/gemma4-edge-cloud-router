@@ -52,6 +52,17 @@ class V15Settings(BaseSettings):
     mock_mode: bool = False
 
 
+class MiddlewareSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="MIDDLEWARE_", env_file=".env", extra="ignore"
+    )
+
+    enabled: bool = True
+    max_prompt_chars: int = 50_000
+    rate_limit_max_requests: int = 60
+    rate_limit_window_seconds: float = 60.0
+
+
 class Settings:
     def __init__(self) -> None:
         self.router = RouterSettings()
@@ -59,6 +70,7 @@ class Settings:
         self.cloud = CloudLLMSettings()
         self.classifier = ClassifierSettings()
         self.v15 = V15Settings()
+        self.middleware = MiddlewareSettings()
 
 
 _settings: Settings | None = None
