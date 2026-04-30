@@ -12,7 +12,10 @@ only need the schema or config.
 from __future__ import annotations
 
 import base64
+import hashlib
+import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Literal, Tuple
 
@@ -23,6 +26,60 @@ from .schema_v15 import CompactSchemaV15
 if TYPE_CHECKING:
     import torch
     import torch.nn as nn
+
+
+class _EncodeCache:
+    """Thread-safe LRU cache mapping sha256(prompt) -> (schema, vec).
+
+    Inference-only. During training, set ``cache_size=0`` so each forward
+    pass goes through the trainable projection layer with fresh autograd
+    state.
+    """
+
+    def __init__(self, maxsize: int = 256) -> None:
+        self.maxsize = maxsize
+        self._d: "OrderedDict[str, tuple]" = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def _key(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def get(self, text: str):
+        with self._lock:
+            k = self._key(text)
+            if k in self._d:
+                self._d.move_to_end(k)
+                self.hits += 1
+                return self._d[k]
+            self.misses += 1
+            return None
+
+    def put(self, text: str, value) -> None:
+        with self._lock:
+            k = self._key(text)
+            self._d[k] = value
+            self._d.move_to_end(k)
+            if len(self._d) > self.maxsize:
+                self._d.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self.hits = 0
+            self.misses = 0
+
+    def stats(self) -> dict:
+        with self._lock:
+            total = self.hits + self.misses
+            return {
+                "size": len(self._d),
+                "maxsize": self.maxsize,
+                "hits": self.hits,
+                "misses": self.misses,
+                "hit_ratio": self.hits / total if total else 0.0,
+            }
 
 
 @dataclass
@@ -67,6 +124,12 @@ class EdgeEncoder:
 
     encode(prompt) returns (CompactSchemaV15, np.ndarray[float16, embedding_dim]).
     The base model is frozen; only ``self.projection`` is trainable.
+
+    The optional inference-time LRU cache keyed on sha256(prompt) skips the
+    forward pass when the same prompt is seen again. Pass ``cache_size=0``
+    to disable — required during training so each step's gradient path
+    runs the trainable projection layer afresh; or call ``clear_cache()``
+    between optimizer steps.
     """
 
     def __init__(
@@ -77,6 +140,7 @@ class EdgeEncoder:
         device: str = "cuda",
         dtype: "Any" = None,
         quantization_config: "Any" = None,
+        cache_size: int = 256,
     ) -> None:
         torch, nn = _load_torch()
         AutoModelForCausalLM, AutoTokenizer = _load_transformers()
@@ -137,6 +201,8 @@ class EdgeEncoder:
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        self._cache = _EncodeCache(maxsize=cache_size) if cache_size > 0 else None
+
     def freeze_base(self) -> None:
         for p in self.base.parameters():
             p.requires_grad_(False)
@@ -196,6 +262,44 @@ class EdgeEncoder:
     def encode(
         self, text: str, return_schema: bool = True
     ) -> Tuple[CompactSchemaV15 | None, np.ndarray]:
+        if self._cache is not None and return_schema:
+            cached = self._cache.get(text)
+            if cached is not None:
+                schema, vec = cached
+                # Re-issue a fresh task_id per call — the embedding is
+                # cached but each request has its own id.
+                schema = schema.model_copy(update={"task_id": str(uuid.uuid4())})
+                return schema, vec
+        elif self._cache is not None:
+            # return_schema=False: still cache by reusing the schema slot's
+            # vec. The cache miss branch below will populate; on hit we
+            # only need the vec.
+            cached = self._cache.get(text)
+            if cached is not None:
+                _, vec = cached
+                return None, vec
+
+        schema, vec = self._encode_uncached(text, return_schema=return_schema)
+
+        if self._cache is not None:
+            # Store the canonical (schema_with_some_task_id, vec). When
+            # return_schema=False we synthesize a minimal schema so the
+            # cache can serve subsequent return_schema=True hits without
+            # rerunning the model.
+            cache_schema = schema if schema is not None else self._build_schema(text, vec)
+            self._cache.put(text, (cache_schema, vec))
+        return schema, vec
+
+    def cache_stats(self) -> dict | None:
+        return self._cache.stats() if self._cache is not None else None
+
+    def clear_cache(self) -> None:
+        if self._cache is not None:
+            self._cache.clear()
+
+    def _encode_uncached(
+        self, text: str, return_schema: bool = True
+    ) -> Tuple[CompactSchemaV15 | None, np.ndarray]:
         torch, _ = _load_torch()
         hidden = self._last_hidden(text)
         proj = self.projection(hidden.to(dtype=self.projection.weight.dtype))
@@ -205,9 +309,12 @@ class EdgeEncoder:
         if not return_schema:
             return None, vec
 
+        return self._build_schema(text, vec), vec
+
+    def _build_schema(self, text: str, vec: np.ndarray) -> CompactSchemaV15:
         complexity = self.classify(text)
-        dtype_label = "float16" if np_dtype == np.float16 else "float32"
-        schema = CompactSchemaV15(
+        dtype_label = "float16" if vec.dtype == np.float16 else "float32"
+        return CompactSchemaV15(
             task_id=str(uuid.uuid4()),
             task_type="other",
             complexity=complexity,
@@ -217,7 +324,6 @@ class EdgeEncoder:
             embedding_dtype=dtype_label,
             embedding_b64=base64.b64encode(vec.tobytes()).decode("ascii"),
         )
-        return schema, vec
 
 
 def decode_embedding_from_schema(schema: CompactSchemaV15) -> np.ndarray:

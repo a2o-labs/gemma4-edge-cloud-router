@@ -84,6 +84,7 @@ def build_pipeline(cfg: TrainConfig):
         hf_token=cfg.hf_token,
         device=device,
         dtype=dtype,
+        cache_size=0,
     )
     adapter = SoftPromptAdapter(
         edge_dim=embedding_dim,
