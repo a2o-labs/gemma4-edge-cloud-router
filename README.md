@@ -1,36 +1,71 @@
 # gemma4-router
 
-V1 skeleton for the Gemma4 Edge-Cloud Semantic Router.
+[![tests](https://github.com/a2o-labs/gemma4-edge-cloud-router/actions/workflows/test.yml/badge.svg)](https://github.com/a2o-labs/gemma4-edge-cloud-router/actions/workflows/test.yml)
 
-Flow: local Gemma4 classifies an inbound request as `light` or `heavy`. Light tasks
-are answered on-device by the edge LLM. Heavy tasks are encoded into a compact
-schema (v1.0) and forwarded to a remote OpenAI-compatible endpoint (litellm).
+Edge-cloud semantic router for the Gemma 4 family. Two coexisting wire formats:
 
-## Setup
+- **V1.0** — light/heavy classifier dispatches to a local edge LLM or a
+  remote OpenAI-compatible endpoint via a compact JSON schema.
+- **V1.5** — adds a dense embedding bridge: the edge model emits a
+  4096-d vector packed into the schema, and a trainable soft-prompt MLP
+  prepends K=8 token embeddings to a frozen cloud LM at inference.
+  BLIP-2 Q-Former pattern; only `~50M` trainable params.
+
+V1.5 lives behind a feature flag (`V15_ENABLED`); V1 is the default and is
+unaffected.
+
+## Quickstart
 
 ```bash
 uv venv
 uv pip install -e '.[dev]'
-cp .env.example .env   # then edit
+cp .env.example .env   # edit
 cp config.example.yaml config.yaml
-```
 
-## Run
-
-```bash
 uvicorn router.api:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-Endpoints:
+Endpoints (V1):
 
 - `POST /route` — main entry, body `{ "prompt": "...", "session_id": "..." }`
 - `GET  /health` — liveness
-- `GET  /metrics` — basic counters (requests, split_ratio, p50_latency)
+- `GET  /metrics` — JSON counters
+- `GET  /metrics/prometheus` — Prometheus text exposition
+
+Endpoints (V1.5, opt-in via `V15_ENABLED=true`):
+
+- `POST /route/v15` — encode + soft-prompt + cloud generate, blocking
+- `POST /route/v15/stream` — same but Server-Sent Events
+  (frame types: `schema`, `token`, `done`)
+
+## Feature summary
+
+| Capability                              | Module                                     | Status |
+|----------------------------------------|--------------------------------------------|--------|
+| V1 classifier + JSON forwarder         | `src/router/{classifier,encoder,forwarder}.py` | ready |
+| V1.5 schema (`embedding_b64`)          | `src/router/schema_v15.py`                 | ready |
+| V1.5 EdgeEncoder (real PyTorch)        | `src/router/edge_encoder.py`               | ready |
+| V1.5 SoftPromptAdapter                 | `src/router/cloud_adapter.py`              | ready |
+| V1.5 pipeline (mock + real)            | `src/router/v15_pipeline.py`               | ready |
+| Streaming SSE response                 | `/route/v15/stream`                        | ready |
+| Embedding-similarity classifier        | `src/router/embedding_classifier.py`       | optional plug-in |
+| Multi-cloud router (task→model)        | `src/router/cloud_router.py`               | standalone (not yet wired into pipeline) |
+| Input validation + rate-limit middleware | `src/router/middleware.py`               | wired by default (`MIDDLEWARE_ENABLED=true`) |
+| OpenTelemetry tracing                  | `src/router/telemetry.py`                  | opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| Prometheus metrics                     | `/metrics/prometheus`                      | always on |
+| LRU cache on `EdgeEncoder.encode`      | `_EncodeCache` (256 default, off in training) | ready |
+| Chunked + batch encoding               | `EdgeEncoder.encode_chunked` / `encode_batch` | ready |
+| bnb 4-bit support (Gemma 4 26B-A4B fit) | `quantization_config` kwarg               | optional via `[quantization]` extra |
+| CLI tool                               | `python -m router.cli` / `gemma4-router-cli` | ready |
+| Training loop (frozen-base + adapter)  | `training/train_v15.py`                    | ready |
+| Eval harness (LLM-as-judge + brier)    | `eval/eval_v15.py`                         | 62-sample dataset |
+| GitHub Actions CI                      | `.github/workflows/test.yml`               | runs on every PR |
 
 ## Test
 
 ```bash
-pytest
+pytest tests/ -m "not slow"      # ~100 tests, CPU only, no HF downloads
+pytest tests/ -m slow            # adds SmolLM2-135M chat-template regression
 ```
 
 ## Docker
@@ -44,22 +79,55 @@ swap for Ollama/vLLM/MLX by editing `docker/compose.yaml`).
 
 ## Layout
 
-- `src/router/api.py` — FastAPI routes
+V1 (untouched since v0.1):
+
+- `src/router/api.py` — FastAPI app + `/route`, `/route/v15`, `/route/v15/stream`,
+  `/health`, `/metrics`, `/metrics/prometheus`
 - `src/router/classifier.py` — light/heavy classifier via edge LLM
 - `src/router/edge_executor.py` — local answer path
 - `src/router/encoder.py` + `schema.py` — CompactTask v1.0 + mask_map
 - `src/router/cloud_forwarder.py` — forwards to litellm
 - `src/router/decoder.py` — unpack cloud response + unmask
-- `src/router/telemetry.py` — OTel stub
-- `bench/judge_ab.py` — offline LLM-as-judge A/B harness (stub)
-- `docs/compact-schema-v1.md` — schema field spec
+- `src/router/telemetry.py` — counters + OTel + Prometheus exposition
+
+V1.5 (added in v0.2):
+
+- `src/router/schema_v15.py` — `CompactSchemaV15`
+- `src/router/edge_encoder.py` — frozen base + trainable projection +
+  LRU cache + batch + chunked encoding
+- `src/router/cloud_adapter.py` — soft-prompt MLP + frozen cloud +
+  blocking + streaming + batch forward
+- `src/router/v15_pipeline.py` — orchestrator with optional classifier
+- `src/router/embedding_classifier.py` — cosine-NN over exemplar bank
+- `src/router/cloud_router.py` — task_type → cloud model policy
+- `src/router/middleware.py` — `CombinedRouteGuard` (raw ASGI)
+- `src/router/cli.py` — one-shot inference CLI
+- `training/train_v15.py` — AdamW over `projection` + `mlp` only
+- `eval/eval_v15.py` + `eval/data/eval_v15.jsonl` — judge + 62 samples
+- `bench/v15_l4_smoke.py` — real-weight L4 smoke (run logs in `bench/README.md`)
+- `deploy/k8s/` — edge inference pod, cloud vLLM, adapter wrapper
+- `docs/v15-architecture.md` — design rationale
 
 ## Status
 
-V1 skeleton. Classifier, encoder, forwarder wired end-to-end but no trained
-Gemma4 adapter yet. LLM-as-judge bench is a stub. See
-`/tmp/router-research-report.md` for the framework evaluation that motivated
-the build decision.
+V1.5 functional end-to-end:
+
+- Real-weight L4 smoke run on `google/gemma-3-1b-it` exercises the
+  encode → wire → cloud generate path on a real CUDA device. JSON
+  summary in `bench/README.md`.
+- Training loop verified on `tiny-random-LlamaForCausalLM` (CPU, 2
+  steps); frozen-base invariant covered by tests.
+- Eval harness ships a 62-sample synthetic dataset; LLM-as-judge mode
+  hooks into a litellm-compatible endpoint.
+
+External dependencies still pending integration:
+
+- A100 80GB cloud target for `SoftPromptAdapter` — SRE-owned (vast.ai).
+- Paired training data — TL data-harvest in the external-pipeline repo.
+- Liqo NamespaceOffloading on the `ai-infra` namespace — SRE follow-up.
+
+See `bench/README.md` and `docs/v15-architecture.md` for hardware specs and
+the V2.5 codebook upgrade gate.
 
 ## V1.5 — hybrid compact-JSON + soft-prompt embedding bridge
 

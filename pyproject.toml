@@ -1,7 +1,7 @@
 [project]
 name = "gemma4-router"
-version = "0.1.0"
-description = "Gemma4 Edge-Cloud Semantic Router V1 — local classifier + compact-schema cloud forwarder"
+version = "0.2.0"
+description = "Gemma4 Edge-Cloud Semantic Router — V1 light/heavy classifier + V1.5 soft-prompt embedding bridge"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
