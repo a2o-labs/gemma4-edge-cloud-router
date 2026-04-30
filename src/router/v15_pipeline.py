@@ -69,11 +69,25 @@ class _MockAdapter:
 class V15Pipeline:
     """End-to-end V1.5 orchestrator."""
 
-    def __init__(self, settings: V15Settings) -> None:
+    def __init__(self, settings: V15Settings, classifier: Any = None) -> None:
+        """V1.5 orchestrator.
+
+        Args:
+            settings: V1.5 configuration (env-driven via V15Settings).
+            classifier: optional EmbeddingClassifier-like object exposing
+                ``classify(vec) -> ClassifyResult``. When supplied and the
+                per-request confidence is at or above
+                ``settings.classifier_min_confidence``, the classifier's
+                ``task_type`` + ``complexity`` overrides the encoder's
+                heuristic before the schema is forwarded to the cloud
+                adapter. A failing classifier degrades silently to the
+                encoder default — the pipeline is never blocked.
+        """
         self.settings = settings
         self._encoder: Any = None
         self._adapter: Any = None
         self._loaded = False
+        self._classifier = classifier
 
     def load(self) -> None:
         if not self.settings.enabled:
@@ -117,6 +131,7 @@ class V15Pipeline:
             schema, vec = self._encoder.encode(prompt, return_schema=True)
             span.set_attribute("complexity", schema.complexity)
             span.set_attribute("embedding_dim", schema.embedding_dim)
+        schema = self._maybe_apply_classifier(schema, vec)
         with tracer.start_as_current_span("v15.forward") as span:
             json_text = schema.model_dump_json()
             response = self._adapter.forward(
@@ -125,6 +140,42 @@ class V15Pipeline:
             span.set_attribute("max_new_tokens", self.settings.max_new_tokens)
             span.set_attribute("response_chars", len(response))
         return schema, response
+
+    def _maybe_apply_classifier(
+        self, schema: CompactSchemaV15, vec: Any
+    ) -> CompactSchemaV15:
+        """Override schema task_type/complexity from classifier when confident.
+
+        Failures degrade silently — the encoder default is preserved.
+        """
+        if self._classifier is None:
+            return schema
+        tracer = get_tracer()
+        with tracer.start_as_current_span("v15.classify") as span:
+            try:
+                result = self._classifier.classify(vec)
+            except Exception as e:
+                span.set_attribute("override_applied", False)
+                span.record_exception(e)
+                log.warning("classifier failed, keeping encoder default: %s", e)
+                return schema
+            threshold = getattr(self.settings, "classifier_min_confidence", 0.5)
+            span.set_attribute("classifier_confidence", float(result.confidence))
+            span.set_attribute("classifier_threshold", float(threshold))
+            if result.confidence >= threshold:
+                span.set_attribute("override_applied", True)
+                span.set_attribute("nearest_id", str(result.nearest_id))
+                span.set_attribute("override_task_type", result.task_type)
+                span.set_attribute("override_complexity", result.complexity)
+                return schema.model_copy(
+                    update={
+                        "task_type": result.task_type,
+                        "complexity": result.complexity,
+                        "confidence": float(result.confidence),
+                    }
+                )
+            span.set_attribute("override_applied", False)
+            return schema
 
     def run_stream(self, prompt: str):
         """Generator yielding (event_type, payload) tuples.
@@ -143,6 +194,7 @@ class V15Pipeline:
             schema, vec = self._encoder.encode(prompt, return_schema=True)
             span.set_attribute("complexity", schema.complexity)
             span.set_attribute("embedding_dim", schema.embedding_dim)
+        schema = self._maybe_apply_classifier(schema, vec)
 
         yield ("schema", schema)
 

@@ -50,6 +50,7 @@ class V15Settings(BaseSettings):
     hf_token: str | None = None
     max_new_tokens: int = 256
     mock_mode: bool = False
+    classifier_min_confidence: float = 0.5
 
 
 class MiddlewareSettings(BaseSettings):
