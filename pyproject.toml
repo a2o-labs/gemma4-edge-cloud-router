@@ -35,6 +35,9 @@ training = [
     "accelerate>=0.34",
     "peft>=0.13",
 ]
+quantization = [
+    "bitsandbytes>=0.43",
+]
 
 [project.scripts]
 gemma4-router = "router.api:run"

@@ -73,6 +73,7 @@ class SoftPromptAdapter:
         cloud_model_name: str = "google/gemma-4-31B-it",
         device: str = "cuda",
         dtype: "Any" = None,
+        quantization_config: "Any" = None,
     ) -> None:
         torch, nn = _load_torch()
         AutoModelForCausalLM, AutoTokenizer = _load_transformers()
@@ -85,17 +86,22 @@ class SoftPromptAdapter:
         self.cloud_model_name = cloud_model_name
         self.device = device
         self.dtype = dtype
+        self.quantization_config = quantization_config
 
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 cloud_model_name, token=hf_token
             )
-            cloud = AutoModelForCausalLM.from_pretrained(
-                cloud_model_name,
-                token=hf_token,
-                torch_dtype=dtype,
-                output_hidden_states=False,
-            )
+            load_kwargs: dict[str, Any] = {
+                "token": hf_token,
+                "output_hidden_states": False,
+            }
+            if quantization_config is not None:
+                load_kwargs["quantization_config"] = quantization_config
+                load_kwargs["device_map"] = "auto"
+            else:
+                load_kwargs["torch_dtype"] = dtype
+            cloud = AutoModelForCausalLM.from_pretrained(cloud_model_name, **load_kwargs)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load cloud model '{cloud_model_name}'. Hint: "
@@ -103,10 +109,11 @@ class SoftPromptAdapter:
                 f"(vast.ai per SRE plan) with HF_TOKEN. Underlying error: {e}"
             ) from e
 
-        try:
-            cloud = cloud.to(device)
-        except Exception:
-            pass
+        if quantization_config is None:
+            try:
+                cloud = cloud.to(device)
+            except Exception:
+                pass
 
         for p in cloud.parameters():
             p.requires_grad_(False)
@@ -120,11 +127,15 @@ class SoftPromptAdapter:
             cloud_hidden = detected_hidden
         self.cloud_hidden = cloud_hidden
 
+        if quantization_config is not None:
+            mlp_device = "cuda" if torch.cuda.is_available() else device
+        else:
+            mlp_device = device
         self.mlp = nn.Sequential(
             nn.Linear(edge_dim, edge_dim * 2),
             nn.GELU(),
             nn.Linear(edge_dim * 2, prompt_tokens * cloud_hidden),
-        ).to(device=device, dtype=dtype)
+        ).to(device=mlp_device, dtype=dtype)
 
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

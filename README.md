@@ -109,6 +109,37 @@ schema or routing layer.
   pod, cloud vLLM, and adapter wrapper. Manifests are unchanged by this
   PR — the model code drop-in is source-compatible.
 
+### 4-bit quantization for L4 (Gemma 4 26B-A4B fit)
+
+Gemma 4 26B-A4B-it at fp16 is ~52GB, which exceeds an L4's 24GB VRAM.
+Use bitsandbytes 4-bit quantization (NF4) to fit ~13GB:
+
+```bash
+uv pip install -e '.[quantization]'
+```
+
+```python
+from transformers import BitsAndBytesConfig
+import torch
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_quant_type="nf4",
+)
+
+enc = EdgeEncoder(
+    model_name="google/gemma-4-26B-A4B-it",
+    embedding_dim=4096,
+    quantization_config=bnb_config,
+)
+```
+
+Same `quantization_config` kwarg is also accepted by `SoftPromptAdapter`
+for the cloud-side base. Trainable layers (`projection` / `mlp`) stay
+fp16 on `cuda`; only the frozen base is 4-bit. This composes cleanly
+with the V1.5 trainer.
+
 ### Calling the V1.5 endpoint
 
 The V1 `/route` endpoint stays unchanged. V1.5 lives under `/route/v15` and

@@ -76,6 +76,7 @@ class EdgeEncoder:
         hf_token: str | None = None,
         device: str = "cuda",
         dtype: "Any" = None,
+        quantization_config: "Any" = None,
     ) -> None:
         torch, nn = _load_torch()
         AutoModelForCausalLM, AutoTokenizer = _load_transformers()
@@ -87,17 +88,24 @@ class EdgeEncoder:
         self.embedding_dim = embedding_dim
         self.device = device
         self.dtype = dtype
+        self.quantization_config = quantization_config
 
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name, token=hf_token
             )
-            base = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                token=hf_token,
-                torch_dtype=dtype,
-                output_hidden_states=True,
-            )
+            load_kwargs: dict[str, Any] = {
+                "token": hf_token,
+                "output_hidden_states": True,
+            }
+            if quantization_config is not None:
+                load_kwargs["quantization_config"] = quantization_config
+                # device_map='auto' is required when using quantization_config;
+                # bnb places weights itself, so don't also pass torch_dtype.
+                load_kwargs["device_map"] = "auto"
+            else:
+                load_kwargs["torch_dtype"] = dtype
+            base = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load base model '{model_name}'. Hint: real Gemma "
@@ -105,10 +113,11 @@ class EdgeEncoder:
                 f"HF_TOKEN configured. Underlying error: {e}"
             ) from e
 
-        try:
-            base = base.to(device)
-        except Exception:
-            pass
+        if quantization_config is None:
+            try:
+                base = base.to(device)
+            except Exception:
+                pass
 
         for p in base.parameters():
             p.requires_grad_(False)
@@ -117,7 +126,13 @@ class EdgeEncoder:
 
         base_hidden = base.config.hidden_size
         self.base_hidden = base_hidden
-        self.projection = nn.Linear(base_hidden, embedding_dim).to(device=device, dtype=dtype)
+        if quantization_config is not None:
+            proj_device = "cuda" if torch.cuda.is_available() else device
+        else:
+            proj_device = device
+        self.projection = nn.Linear(base_hidden, embedding_dim).to(
+            device=proj_device, dtype=dtype
+        )
 
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
