@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Create venv + install dev deps
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e '.[dev]'
+          uv pip install 'torch>=2.4' 'transformers>=4.45'
+
+      - name: Ruff
+        run: |
+          source .venv/bin/activate
+          ruff check src/ tests/ eval/ training/ bench/
+
+      - name: Pytest (skip slow + skip CUDA-only)
+        env:
+          V15_MOCK_MODE: "true"
+          V15_DEVICE: "cpu"
+          PYTEST_SKIP_NETWORK: "true"
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/ -v -m "not slow" --tb=short
