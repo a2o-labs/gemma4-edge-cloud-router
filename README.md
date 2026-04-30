@@ -133,3 +133,33 @@ curl -X POST http://localhost:8080/route/v15 \
 Response shape: `{ task_id, path: "v1.5", answer, schema_version: "1.5",
 embedding_dim, complexity, latency_ms }`. When `V15_ENABLED=false` (default)
 or the pipeline failed to load, `/route/v15` returns `503`.
+
+### Evaluating V1 vs V1.5
+
+The eval harness in `eval/eval_v15.py` runs a small canned dataset through
+both V1 and V1.5 paths and reports:
+
+- `v1_success_rate` / `v15_success_rate` via LLM-as-judge
+- `delta` (V1.5 - V1; positive = V1.5 better)
+- `token_reduction_ratio` (compact JSON schema vs full prompt, measured with
+  `tiktoken cl100k_base` as a proxy for the Gemma tokenizer)
+- `classifier_brier_score` (light/heavy correctness)
+
+Mock mode (no GPU, no real judge — used in CI):
+
+    python -m eval.eval_v15 --dataset canned --mode mock --judge mock
+
+Real mode (router running, judge LLM accessible):
+
+    python -m eval.eval_v15 --dataset eval/data/eval_v15.jsonl --mode http \
+        --router-base http://localhost:8080 \
+        --judge llm \
+        --judge-base http://localhost:4000/v1 \
+        --judge-model claude-haiku-4-5
+
+The bundled canned dataset lives at `eval/data/eval_v15.jsonl` (10 samples
+covering qa / code / summarize / translate / reason / chat).
+
+A locust load test stub for `/route/v15` lives at `eval/locust_v15.py` —
+manual run: `pip install locust && locust -f eval/locust_v15.py --host
+http://localhost:8080`. Not exercised in CI.
