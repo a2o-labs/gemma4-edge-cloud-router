@@ -189,6 +189,56 @@ class SoftPromptAdapter:
 
         return self.tokenizer.decode(out_ids[0], skip_special_tokens=True)
 
+    def forward_batch(
+        self,
+        edge_vecs: "torch.Tensor | np.ndarray",
+        json_texts: list[str],
+        max_new_tokens: int = 256,
+    ) -> list[str]:
+        """Generate responses for a batch of (edge_vec, json_text) pairs.
+
+        All B prompts are generated with the same ``max_new_tokens``. Returns
+        a list of decoded strings of length B in the input order.
+        """
+        torch, _ = _load_torch()
+
+        if isinstance(edge_vecs, np.ndarray):
+            edge_vecs = torch.from_numpy(edge_vecs.astype(np.float32))
+        edge_vecs = edge_vecs.to(device=self.device, dtype=self.dtype)
+        if edge_vecs.dim() == 1:
+            edge_vecs = edge_vecs.unsqueeze(0)
+        B = edge_vecs.shape[0]
+        if len(json_texts) != B:
+            raise ValueError(f"len(json_texts)={len(json_texts)} != B={B}")
+
+        soft = self.mlp(edge_vecs).reshape(B, self.prompt_tokens, self.cloud_hidden)
+
+        tok = self.tokenizer(
+            json_texts, return_tensors="pt", padding=True, truncation=False
+        )
+        input_ids = tok.input_ids.to(self.device)
+        text_attn = tok.attention_mask.to(self.device)
+        text_embeds = self.cloud.get_input_embeddings()(input_ids)
+
+        embeds = torch.cat([soft, text_embeds], dim=1)
+        soft_attn = torch.ones(
+            B, self.prompt_tokens, dtype=torch.long, device=self.device
+        )
+        attention_mask = torch.cat([soft_attn, text_attn], dim=1)
+
+        with torch.no_grad():
+            out_ids = self.cloud.generate(
+                inputs_embeds=embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        return [
+            self.tokenizer.decode(out_ids[i], skip_special_tokens=True)
+            for i in range(B)
+        ]
+
     def forward_stream(
         self,
         edge_vec: "torch.Tensor | np.ndarray",

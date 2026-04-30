@@ -326,6 +326,123 @@ class EdgeEncoder:
         )
 
 
+    def encode_batch(
+        self,
+        texts: list[str],
+        return_schema: bool = True,
+    ) -> Tuple[list, list]:
+        """Encode N prompts in a single base forward pass.
+
+        Returns ``(schemas, vecs)`` of length N. The LRU cache is consulted
+        per text; cache misses are batched and run together. Falls back to
+        per-text ``encode()`` when ``len(texts) <= 1``.
+        """
+        if len(texts) <= 1:
+            results = [self.encode(t, return_schema=return_schema) for t in texts]
+            return ([r[0] for r in results], [r[1] for r in results])
+
+        cached_results: dict[int, tuple] = {}
+        miss_idx: list[int] = []
+        if self._cache is not None and return_schema:
+            for i, t in enumerate(texts):
+                hit = self._cache.get(t)
+                if hit is not None:
+                    schema, vec = hit
+                    schema = schema.model_copy(update={"task_id": str(uuid.uuid4())})
+                    cached_results[i] = (schema, vec)
+                else:
+                    miss_idx.append(i)
+        elif self._cache is not None:
+            for i, t in enumerate(texts):
+                hit = self._cache.get(t)
+                if hit is not None:
+                    _, vec = hit
+                    cached_results[i] = (None, vec)
+                else:
+                    miss_idx.append(i)
+        else:
+            miss_idx = list(range(len(texts)))
+
+        if not miss_idx:
+            out = [cached_results[i] for i in range(len(texts))]
+            return ([o[0] for o in out], [o[1] for o in out])
+
+        torch, _ = _load_torch()
+        miss_texts = [texts[i] for i in miss_idx]
+
+        if getattr(self.tokenizer, "chat_template", None):
+            ids_list = [self._tokenize(t) for t in miss_texts]
+            max_len = max(t.shape[1] for t in ids_list)
+            pad_id = self.tokenizer.pad_token_id or 0
+            padded = []
+            attn = []
+            for t in ids_list:
+                n = t.shape[1]
+                if n < max_len:
+                    pad = torch.full(
+                        (1, max_len - n), pad_id, dtype=t.dtype, device=self.device
+                    )
+                    padded.append(torch.cat([t, pad], dim=1))
+                    a = torch.cat(
+                        [
+                            torch.ones(1, n, dtype=torch.long, device=self.device),
+                            torch.zeros(
+                                1, max_len - n, dtype=torch.long, device=self.device
+                            ),
+                        ],
+                        dim=1,
+                    )
+                else:
+                    padded.append(t)
+                    a = torch.ones(1, n, dtype=torch.long, device=self.device)
+                attn.append(a)
+            input_ids = torch.cat(padded, dim=0)
+            attention_mask = torch.cat(attn, dim=0)
+        else:
+            tok_out = self.tokenizer(
+                miss_texts, return_tensors="pt", padding=True, truncation=False
+            )
+            input_ids = tok_out.input_ids.to(self.device)
+            attention_mask = tok_out.attention_mask.to(self.device)
+
+        with torch.no_grad():
+            base_out = self.base(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+        last_layer = base_out.hidden_states[-1]
+        seq_lens = attention_mask.sum(dim=1) - 1
+        batch_idx = torch.arange(last_layer.shape[0], device=last_layer.device)
+        last_token_hidden = last_layer[batch_idx, seq_lens]
+
+        projected = self.projection(
+            last_token_hidden.to(dtype=self.projection.weight.dtype)
+        )
+        np_dtype = np.float16 if self.dtype is torch.float16 else np.float32
+        proj_np = (
+            projected.detach().to("cpu").to(torch.float32).numpy().astype(np_dtype)
+        )
+
+        results: list[tuple | None] = [None] * len(texts)
+        for i, pair in cached_results.items():
+            results[i] = pair
+        for k, idx in enumerate(miss_idx):
+            vec = proj_np[k]
+            if return_schema:
+                schema = self._build_schema(texts[idx], vec)
+                results[idx] = (schema, vec)
+                if self._cache is not None:
+                    self._cache.put(texts[idx], (schema, vec))
+            else:
+                results[idx] = (None, vec)
+                if self._cache is not None:
+                    cache_schema = self._build_schema(texts[idx], vec)
+                    self._cache.put(texts[idx], (cache_schema, vec))
+
+        return ([r[0] for r in results], [r[1] for r in results])
+
     def encode_chunked(
         self,
         text: str,
