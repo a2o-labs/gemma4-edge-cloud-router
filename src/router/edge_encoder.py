@@ -133,11 +133,22 @@ class EdgeEncoder:
     def _tokenize(self, text: str):
         torch, _ = _load_torch()
         if getattr(self.tokenizer, "chat_template", None):
-            ids = self.tokenizer.apply_chat_template(
+            out = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": text}],
                 add_generation_prompt=True,
                 return_tensors="pt",
+                return_dict=True,
             )
+            # transformers 5.x returns a BatchEncoding (dict-like) from
+            # apply_chat_template even when return_tensors="pt"; older 4.x with
+            # return_dict=True also returns a dict; some 4.x paths return a raw
+            # Tensor. Normalize all three to a Tensor of input_ids.
+            if torch.is_tensor(out):
+                ids = out
+            elif isinstance(out, dict):
+                ids = out["input_ids"]
+            else:
+                ids = out.input_ids
         else:
             ids = self.tokenizer(text, return_tensors="pt").input_ids
         return ids.to(self.device)

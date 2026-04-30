@@ -50,6 +50,9 @@ packages = ["src/router"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "slow: requires network and downloads small public model",
+]
 
 [tool.ruff]
 line-length = 100
