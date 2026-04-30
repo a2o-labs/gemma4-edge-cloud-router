@@ -165,6 +165,32 @@ Response shape: `{ task_id, path: "v1.5", answer, schema_version: "1.5",
 embedding_dim, complexity, latency_ms }`. When `V15_ENABLED=false` (default)
 or the pipeline failed to load, `/route/v15` returns `503`.
 
+### Observability — OpenTelemetry tracing
+
+Install the optional extra and set `OTEL_EXPORTER_OTLP_ENDPOINT`:
+
+```bash
+pip install '.[observability]'
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability:4317
+export OTEL_SERVICE_NAME=gemma4-router
+```
+
+The router emits these spans:
+
+| Span name        | Surface           | Useful attrs                          |
+|------------------|-------------------|---------------------------------------|
+| `route.classify` | `/route` only     | `force`, `complexity`, `confidence`   |
+| `route.dispatch` | `/route` only     | `path` ∈ {light, heavy}               |
+| `v15.run`        | `/route/v15`      | `prompt_chars`, `complexity`, `answer_chars` |
+| `v15.encode`     | inside `v15.run`  | `embedding_dim`, `complexity`         |
+| `v15.forward`    | inside `v15.run`  | `max_new_tokens`, `response_chars`    |
+
+FastAPI HTTP-layer spans (request method, route, status) are auto-emitted
+by `opentelemetry-instrumentation-fastapi`.
+
+If the optional extra is not installed or `OTEL_EXPORTER_OTLP_ENDPOINT`
+is unset, all instrumentation degrades to no-ops with zero overhead.
+
 ### Evaluating V1 vs V1.5
 
 The eval harness in `eval/eval_v15.py` runs a small canned dataset through

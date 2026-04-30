@@ -15,6 +15,7 @@ from typing import Any
 
 from .config import V15Settings
 from .schema_v15 import CompactSchemaV15
+from .telemetry import get_tracer
 
 log = logging.getLogger("v15-pipeline")
 
@@ -104,9 +105,16 @@ class V15Pipeline:
             raise RuntimeError(
                 "V1.5 pipeline not loaded. Set V15_ENABLED=true and call .load() at startup."
             )
-        schema, vec = self._encoder.encode(prompt, return_schema=True)
-        json_text = schema.model_dump_json()
-        response = self._adapter.forward(
-            vec, json_text, max_new_tokens=self.settings.max_new_tokens
-        )
+        tracer = get_tracer()
+        with tracer.start_as_current_span("v15.encode") as span:
+            schema, vec = self._encoder.encode(prompt, return_schema=True)
+            span.set_attribute("complexity", schema.complexity)
+            span.set_attribute("embedding_dim", schema.embedding_dim)
+        with tracer.start_as_current_span("v15.forward") as span:
+            json_text = schema.model_dump_json()
+            response = self._adapter.forward(
+                vec, json_text, max_new_tokens=self.settings.max_new_tokens
+            )
+            span.set_attribute("max_new_tokens", self.settings.max_new_tokens)
+            span.set_attribute("response_chars", len(response))
         return schema, response

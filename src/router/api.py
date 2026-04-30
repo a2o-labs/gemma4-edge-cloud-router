@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from .schema import (
     V15RouteRequest,
     V15RouteResponse,
 )
-from .telemetry import Telemetry
+from .telemetry import Telemetry, get_tracer, setup_otel
 from .v15_pipeline import V15Pipeline
 
 log = logging.getLogger("router")
@@ -66,6 +67,22 @@ async def lifespan(app: FastAPI):
     app.state.classifier = Classifier(_EdgeChatClient(edge_exec), settings.classifier)
     app.state.telemetry = Telemetry()
 
+    tracer = setup_otel()
+    if tracer:
+        log.info(
+            "OTel tracing enabled — endpoint=%s",
+            os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        )
+        try:
+            from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+            FastAPIInstrumentor.instrument_app(app)
+        except ImportError:
+            log.warning(
+                "OTel observability extra not installed; FastAPI instrumentation skipped"
+            )
+    app.state.tracer = tracer
+
     v15_pipeline = V15Pipeline(settings.v15)
     try:
         v15_pipeline.load()
@@ -107,30 +124,41 @@ async def route(req: RouteRequest) -> RouteResponse:
     edge_exec: EdgeExecutor = app.state.edge_executor
     telemetry: Telemetry = app.state.telemetry
 
-    if req.force in {"light", "heavy"}:
-        complexity = req.force
-        confidence = 1.0
-        task_type = "other"
-        fell_back = False
-    else:
-        result = await classifier.classify(req.prompt)
-        complexity = result.complexity
-        confidence = result.confidence
-        task_type = result.task_type
-        fell_back = result.fell_back
+    tracer = get_tracer()
 
-    try:
-        if complexity == "light":
-            answer = await edge_exec.answer(req.prompt)
-            task_id = uuid.uuid4().hex
+    with tracer.start_as_current_span("route.classify") as span:
+        span.set_attribute("force", req.force or "auto")
+        if req.force in {"light", "heavy"}:
+            complexity = req.force
+            confidence = 1.0
+            task_type = "other"
+            fell_back = False
         else:
-            task = encoder.encode(req.prompt, session_id=session_id, task_type=task_type)
-            task_id = task.task_id
-            cloud_answer = await forwarder.forward(task)
-            answer = decoder.decode(session_id, cloud_answer)
-    except httpx.HTTPError as exc:
-        log.exception("upstream error on %s path", complexity)
-        raise HTTPException(status_code=502, detail=f"upstream {complexity} error: {exc}") from exc
+            result = await classifier.classify(req.prompt)
+            complexity = result.complexity
+            confidence = result.confidence
+            task_type = result.task_type
+            fell_back = result.fell_back
+        span.set_attribute("complexity", complexity)
+        span.set_attribute("confidence", confidence)
+
+    with tracer.start_as_current_span("route.dispatch") as span:
+        span.set_attribute("path", complexity)
+        try:
+            if complexity == "light":
+                answer = await edge_exec.answer(req.prompt)
+                task_id = uuid.uuid4().hex
+            else:
+                task = encoder.encode(req.prompt, session_id=session_id, task_type=task_type)
+                task_id = task.task_id
+                cloud_answer = await forwarder.forward(task)
+                answer = decoder.decode(session_id, cloud_answer)
+        except httpx.HTTPError as exc:
+            span.record_exception(exc)
+            log.exception("upstream error on %s path", complexity)
+            raise HTTPException(
+                status_code=502, detail=f"upstream {complexity} error: {exc}"
+            ) from exc
 
     latency_ms = (time.perf_counter() - start) * 1000
     telemetry.record(path=complexity, latency_ms=latency_ms, classifier_fell_back=fell_back)
@@ -149,12 +177,20 @@ async def route_v15(req: V15RouteRequest) -> V15RouteResponse:
     pipeline: V15Pipeline = app.state.v15_pipeline
     if not pipeline.is_ready():
         raise HTTPException(status_code=503, detail="V1.5 pipeline disabled or not loaded")
+    tracer = get_tracer()
     start = time.perf_counter()
-    try:
-        schema, answer = pipeline.run(req.prompt)
-    except Exception as exc:
-        log.exception("V1.5 pipeline error")
-        raise HTTPException(status_code=502, detail=f"v1.5 pipeline error: {exc}") from exc
+    with tracer.start_as_current_span("v15.run") as span:
+        span.set_attribute("prompt_chars", len(req.prompt))
+        try:
+            schema, answer = pipeline.run(req.prompt)
+        except Exception as exc:
+            span.record_exception(exc)
+            log.exception("V1.5 pipeline error")
+            raise HTTPException(
+                status_code=502, detail=f"v1.5 pipeline error: {exc}"
+            ) from exc
+        span.set_attribute("complexity", schema.complexity)
+        span.set_attribute("answer_chars", len(answer))
     latency_ms = (time.perf_counter() - start) * 1000
     app.state.telemetry.record(path="v1.5", latency_ms=latency_ms, classifier_fell_back=False)
     return V15RouteResponse(
