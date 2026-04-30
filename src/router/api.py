@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from .classifier import Classifier, ChatClient
 from .cloud_forwarder import CloudForwarder
@@ -111,6 +111,14 @@ async def health() -> dict[str, str]:
 @app.get("/metrics")
 async def metrics() -> dict[str, Any]:
     return app.state.telemetry.snapshot()
+
+
+@app.get("/metrics/prometheus", response_class=PlainTextResponse)
+async def metrics_prometheus() -> PlainTextResponse:
+    return PlainTextResponse(
+        content=app.state.telemetry.format_prometheus(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.post("/route", response_model=RouteResponse)

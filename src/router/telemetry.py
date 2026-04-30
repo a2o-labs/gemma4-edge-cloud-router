@@ -23,6 +23,10 @@ if TYPE_CHECKING:
     from opentelemetry.trace import Tracer
 
 
+_LATENCY_PER_PATH_CAP = 1000
+_PROM_BUCKETS_S = (0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0)
+
+
 @dataclass
 class Counters:
     total: int = 0
@@ -31,6 +35,7 @@ class Counters:
     v15: int = 0
     classifier_fallback: int = 0
     latency_samples_ms: list[float] = field(default_factory=list)
+    latency_per_path_ms: dict[str, list[float]] = field(default_factory=dict)
 
 
 class Telemetry:
@@ -53,6 +58,10 @@ class Telemetry:
             self._counters.latency_samples_ms.append(latency_ms)
             if len(self._counters.latency_samples_ms) > 1024:
                 self._counters.latency_samples_ms = self._counters.latency_samples_ms[-1024:]
+            per_path = self._counters.latency_per_path_ms.setdefault(path, [])
+            per_path.append(latency_ms)
+            if len(per_path) > _LATENCY_PER_PATH_CAP:
+                del per_path[: len(per_path) - _LATENCY_PER_PATH_CAP]
 
     def snapshot(self) -> dict[str, float | int]:
         with self._lock:
@@ -71,6 +80,57 @@ class Telemetry:
                 "p50_latency_ms": round(p50, 2),
                 "ts": time.time(),
             }
+
+    def format_prometheus(self) -> str:
+        """Emit Prometheus exposition format (text/plain; version=0.0.4)."""
+        with self._lock:
+            c = self._counters
+            per_path = {p: list(v) for p, v in c.latency_per_path_ms.items()}
+            light = c.light
+            heavy = c.heavy
+            v15 = c.v15
+            classifier_fallback = c.classifier_fallback
+
+        lines = [
+            "# HELP gemma4_router_requests_total Total requests by path",
+            "# TYPE gemma4_router_requests_total counter",
+            f'gemma4_router_requests_total{{path="light"}} {light}',
+            f'gemma4_router_requests_total{{path="heavy"}} {heavy}',
+            f'gemma4_router_requests_total{{path="v1.5"}} {v15}',
+            "",
+            "# HELP gemma4_router_classifier_fallback_total Classifier fallbacks",
+            "# TYPE gemma4_router_classifier_fallback_total counter",
+            f"gemma4_router_classifier_fallback_total {classifier_fallback}",
+            "",
+            "# HELP gemma4_router_latency_seconds Request latency histogram",
+            "# TYPE gemma4_router_latency_seconds histogram",
+        ]
+        for path in ("light", "heavy", "v1.5"):
+            latencies = per_path.get(path, [])
+            if not latencies:
+                continue
+            seconds = [ms / 1000.0 for ms in latencies]
+            cumulative = 0
+            sorted_s = sorted(seconds)
+            i = 0
+            for b in _PROM_BUCKETS_S:
+                while i < len(sorted_s) and sorted_s[i] <= b:
+                    i += 1
+                cumulative = i
+                lines.append(
+                    f'gemma4_router_latency_seconds_bucket{{path="{path}",le="{b}"}} {cumulative}'
+                )
+            lines.append(
+                f'gemma4_router_latency_seconds_bucket{{path="{path}",le="+Inf"}} {len(seconds)}'
+            )
+            lines.append(
+                f'gemma4_router_latency_seconds_sum{{path="{path}"}} {sum(seconds)}'
+            )
+            lines.append(
+                f'gemma4_router_latency_seconds_count{{path="{path}"}} {len(seconds)}'
+            )
+            lines.append("")
+        return "\n".join(lines) + "\n"
 
 
 class _NoopSpan:
