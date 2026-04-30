@@ -47,6 +47,7 @@ observability = [
 
 [project.scripts]
 gemma4-router = "router.api:run"
+gemma4-router-cli = "router.cli:main"
 
 [build-system]
 requires = ["hatchling"]
