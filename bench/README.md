@@ -207,6 +207,70 @@ Notes on the numbers:
   `SoftPromptAdapter` `__init__` — still a follow-up before 26B-A4B
   fits.
 
+## 2026-05-02 endpoint migration — Ollama replaces llama.cpp+k3s
+
+The original L4 (`l4-edge-1` @ `<redacted-tailnet-ip>`) was on a free-trial
+GCE create that expired; the instance terminated. A replacement
+`g2-standard-4` + L4 was provisioned and runs **Ollama 0.22.1**
+(simpler than the previous llama.cpp + k3s + flannel-bypass stack).
+
+### New edge endpoint
+
+| field | value |
+|---|---|
+| tailnet hostname | `l4-edge-2` |
+| tailnet IP | `<edge-host>` |
+| stack | Ollama 0.22.1 |
+| OpenAI-compat URL | `http://<edge-host>:11434/v1` |
+| model | `gemma3:27b` (Q4_K_M, 17 GB on disk) |
+| provisioning | GCE `g2-standard-4` Spot, `auto_restart=false` |
+| disk | 64 GB boot (resized from 10 GB default) |
+
+### Why Ollama instead of llama.cpp+k3s
+
+Fresh Debian 12 + 64 GB disk + a single L4: time-to-first-inference is
+the priority, not orchestration. Ollama's installer auto-handles the
+NVIDIA driver, exposes a OpenAI-compatible HTTP API on `:11434`, and
+ships pre-quantised models from its registry. The previous llama.cpp +
+k3s + hostNetwork DNS-bypass plumbing was solving problems that don't
+exist on a fresh single-node VM.
+
+### Smoke
+
+```
+$ time curl -sS http://<edge-host>:11434/api/generate \
+    -d '{"model":"gemma3:27b","prompt":"Hello, what is 2+2? answer in 5 words.","stream":false}'
+{"model":"gemma3:27b","response":"The answer is simply four.",
+ "total_duration":131763819227,"prompt_eval_duration":132126411,
+ "eval_count":8,"eval_duration":518070744,...}
+```
+
+131 s cold-load (17 GB → GPU); warm path ~520 ms / 8 generated tokens
+on the L4 Q4_K_M (~ 15 tok/s). Peak GPU memory: 18 / 23 GiB.
+
+### Caveats vs the previous endpoint
+
+- **Different model family**: `gemma3:27b` (text-only Causal LM) instead
+  of `gemma-4-26B-A4B-it` (multimodal, MoE). Prompt formatting may need
+  re-tuning for callers ported from the old endpoint.
+- **No model surgery via Ollama**: the V1.5 `SoftPromptAdapter` still
+  needs direct `embed_tokens` access; that path requires a custom
+  transformers loader (Ollama only exposes chat completions). Track 2
+  of the deployment plan documented in `docs/v15-architecture.md`.
+- **Spot preemption**: `auto_restart=false` means the instance stays
+  off after preemption. Ops need a manual GCP-console restart; OS
+  state (Ollama install, GPU driver, model weights) survives on the
+  64 GB boot disk.
+
+### What's gone
+
+- `<redacted-tailnet-ip>` no longer routable (instance terminated).
+- The k3s / svclb / nvidia-device-plugin manifests under `deploy/k8s/`
+  describe the old llama.cpp deployment — left in tree as historical
+  reference. If/when k3s is needed again on a fresh L4, those
+  manifests still apply but disk-pressure-eviction safeguards from
+  PR #7's debrief should be added (cache cleanup CronJob).
+
 ## judge_ab.py
 
 Pre-existing A/B judge harness from earlier work; unrelated to V1.5.

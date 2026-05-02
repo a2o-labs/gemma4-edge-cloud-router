@@ -2,6 +2,16 @@
 
 All notable changes to gemma4-router are documented here.
 
+## Unreleased
+
+### Infrastructure
+
+- **L4 edge endpoint migrated** from `l4-edge-1 @ <redacted-tailnet-ip>`
+  (free-trial expired, instance terminated) to `l4-edge-2 @
+  <edge-host>`. Stack is now Ollama 0.22.1 (was llama.cpp + k3s);
+  model is `gemma3:27b` Q4_K_M (was `gemma-4-26B-A4B-it` Q4_K_M GGUF).
+  Full migration write-up in `bench/README.md`.
+
 ## v0.2.0 — 2026-05-01
 
 V1.5 production release: real PyTorch model code, full pipeline plumbed
