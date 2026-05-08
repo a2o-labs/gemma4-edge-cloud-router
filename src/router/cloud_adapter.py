@@ -120,7 +120,14 @@ class SoftPromptAdapter:
         cloud.eval()
         self.cloud = cloud
 
-        detected_hidden = cloud.config.hidden_size
+        # Gemma 3 / Gemma 4 are multimodal — top-level config has no
+        # `hidden_size`; the text decoder's hidden_size lives at
+        # `config.text_config.hidden_size`. Pure causal LM configs keep it
+        # at the top level.
+        detected_hidden = (
+            getattr(cloud.config, "hidden_size", None)
+            or cloud.config.text_config.hidden_size
+        )
         if cloud_hidden is None:
             cloud_hidden = detected_hidden
         elif cloud_hidden != detected_hidden:

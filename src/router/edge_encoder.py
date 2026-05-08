@@ -188,7 +188,14 @@ class EdgeEncoder:
         base.eval()
         self.base = base
 
-        base_hidden = base.config.hidden_size
+        # Gemma 3 / Gemma 4 are multimodal — their config has no top-level
+        # `hidden_size`; the text decoder's hidden_size lives at
+        # `config.text_config.hidden_size`. Pure causal LM configs (Llama,
+        # Mistral, tiny-random-Llama) keep `hidden_size` at the top level.
+        base_hidden = (
+            getattr(base.config, "hidden_size", None)
+            or base.config.text_config.hidden_size
+        )
         self.base_hidden = base_hidden
         if quantization_config is not None:
             proj_device = "cuda" if torch.cuda.is_available() else device
