@@ -1,0 +1,86 @@
+{
+  "edge_url": "http://<edge-host>:8002",
+  "cloud_url": "http://<cloud-host>:8001",
+  "cloud_model": "google/gemma-3-27b-it",
+  "quantization": "bnb_4bit_nf4",
+  "cuda_device": "NVIDIA A100-SXM4-80GB",
+  "max_new_tokens": 64,
+  "results": [
+    {
+      "batch": 1,
+      "max_new_tokens": 64,
+      "trials_compute_ms": [
+        6777.2,
+        6746.2,
+        6724.4
+      ],
+      "trials_rtt_ms": [
+        6873.5,
+        6841.8,
+        6827.1
+      ],
+      "best_compute_ms": 6724.4,
+      "median_compute_ms": 6746.2,
+      "best_tokens_per_sec": 9.5,
+      "per_user_latency_ms": 6724.4,
+      "speedup_vs_serial_at_B1": 1.0
+    },
+    {
+      "batch": 2,
+      "max_new_tokens": 64,
+      "trials_compute_ms": [
+        9446.0,
+        9455.8,
+        9410.0
+      ],
+      "trials_rtt_ms": [
+        9549.3,
+        9552.4,
+        9546.3
+      ],
+      "best_compute_ms": 9410.0,
+      "median_compute_ms": 9446.0,
+      "best_tokens_per_sec": 13.6,
+      "per_user_latency_ms": 4705.0,
+      "speedup_vs_serial_at_B1": 1.43
+    },
+    {
+      "batch": 4,
+      "max_new_tokens": 64,
+      "trials_compute_ms": [
+        11408.0,
+        11406.7,
+        11403.7
+      ],
+      "trials_rtt_ms": [
+        11667.9,
+        11581.1,
+        11590.5
+      ],
+      "best_compute_ms": 11403.7,
+      "median_compute_ms": 11406.7,
+      "best_tokens_per_sec": 22.4,
+      "per_user_latency_ms": 2850.9,
+      "speedup_vs_serial_at_B1": 2.36
+    },
+    {
+      "batch": 8,
+      "max_new_tokens": 64,
+      "trials_compute_ms": [
+        15694.4,
+        15691.4,
+        15682.0
+      ],
+      "trials_rtt_ms": [
+        15844.4,
+        15832.8,
+        15821.2
+      ],
+      "best_compute_ms": 15682.0,
+      "median_compute_ms": 15691.4,
+      "best_tokens_per_sec": 32.6,
+      "per_user_latency_ms": 1960.2,
+      "speedup_vs_serial_at_B1": 3.43
+    }
+  ]
+}

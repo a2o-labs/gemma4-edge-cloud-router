@@ -1,0 +1,151 @@
+{
+  "edge": {
+    "url": "http://<edge-host>:8002",
+    "model": "google/gemma-3-1b-it",
+    "embedding_dim": 1152,
+    "cuda_device": "NVIDIA L4",
+    "cuda_mem_used_gb": 2.06
+  },
+  "cloud": {
+    "url": "http://<cloud-host>:8001",
+    "model": "google/gemma-3-27b-it",
+    "hidden": 5376,
+    "quantization": "bnb_4bit_nf4",
+    "prompt_tokens": 8,
+    "cuda_device": "NVIDIA A100-SXM4-80GB",
+    "cuda_mem_used_gb": 18.35
+  },
+  "max_new_tokens": 64,
+  "n_prompts": 5,
+  "encode_compute_ms": {
+    "n": 5,
+    "p50": 57.1,
+    "p95": 81.7,
+    "min": 55.6,
+    "max": 81.7
+  },
+  "encode_rtt_ms": {
+    "n": 5,
+    "p50": 70.7,
+    "p95": 95.2,
+    "min": 68.9,
+    "max": 95.2
+  },
+  "encode_network_ms": {
+    "n": 5,
+    "p50": 13.6,
+    "p95": 13.9,
+    "min": 13.3,
+    "max": 13.9
+  },
+  "forward_compute_ms": {
+    "n": 5,
+    "p50": 6704.5,
+    "p95": 6932.1,
+    "min": 6674.4,
+    "max": 6932.1
+  },
+  "forward_rtt_ms": {
+    "n": 5,
+    "p50": 6807.0,
+    "p95": 7053.4,
+    "min": 6768.0,
+    "max": 7053.4
+  },
+  "forward_network_ms": {
+    "n": 5,
+    "p50": 102.5,
+    "p95": 121.3,
+    "min": 93.6,
+    "max": 121.3
+  },
+  "total_ms": {
+    "n": 5,
+    "p50": 6877.5,
+    "p95": 7122.3,
+    "min": 6856.2,
+    "max": 7122.3
+  },
+  "answers": [
+    {
+      "prompt": "What is the capital of Japan?",
+      "complexity": "light",
+      "schema_json_bytes": 3361,
+      "encode_compute_ms": 55.6,
+      "encode_rtt_ms": 68.9,
+      "forward_compute_ms": 6932.1,
+      "forward_decode_ms": 0.1,
+      "forward_rtt_ms": 7053.4,
+      "total_ms": 7122.3,
+      "n_in_tokens": 2226,
+      "n_out_tokens": 64,
+      "output_chars": 0,
+      "output_preview": "",
+      "output_raw_preview": "<pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad>"
+    },
+    {
+      "prompt": "List the planets",
+      "complexity": "light",
+      "schema_json_bytes": 3361,
+      "encode_compute_ms": 81.7,
+      "encode_rtt_ms": 95.2,
+      "forward_compute_ms": 6674.4,
+      "forward_decode_ms": 0.08,
+      "forward_rtt_ms": 6768.0,
+      "total_ms": 6863.2,
+      "n_in_tokens": 2232,
+      "n_out_tokens": 64,
+      "output_chars": 0,
+      "output_preview": "",
+      "output_raw_preview": "<pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad>"
+    },
+    {
+      "prompt": "Write a poem about the ocean",
+      "complexity": "light",
+      "schema_json_bytes": 3361,
+      "encode_compute_ms": 57.1,
+      "encode_rtt_ms": 70.7,
+      "forward_compute_ms": 6687.7,
+      "forward_decode_ms": 0.1,
+      "forward_rtt_ms": 6785.5,
+      "total_ms": 6856.2,
+      "n_in_tokens": 2242,
+      "n_out_tokens": 64,
+      "output_chars": 0,
+      "output_preview": "",
+      "output_raw_preview": "<pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad>"
+    },
+    {
+      "prompt": "Solve: 17 * 23",
+      "complexity": "light",
+      "schema_json_bytes": 3361,
+      "encode_compute_ms": 57.3,
+      "encode_rtt_ms": 71.2,
+      "forward_compute_ms": 6710.6,
+      "forward_decode_ms": 0.12,
+      "forward_rtt_ms": 6826.0,
+      "total_ms": 6897.2,
+      "n_in_tokens": 2294,
+      "n_out_tokens": 64,
+      "output_chars": 0,
+      "output_preview": "",
+      "output_raw_preview": "<pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad>"
+    },
+    {
+      "prompt": "Define the word 'serendipity'",
+      "complexity": "light",
+      "schema_json_bytes": 3361,
+      "encode_compute_ms": 56.6,
+      "encode_rtt_ms": 70.5,
+      "forward_compute_ms": 6704.5,
+      "forward_decode_ms": 0.07,
+      "forward_rtt_ms": 6807.0,
+      "total_ms": 6877.5,
+      "n_in_tokens": 2256,
+      "n_out_tokens": 64,
+      "output_chars": 0,
+      "output_preview": "",
+      "output_raw_preview": "<pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad><pad>"
+    }
+  ]
+}

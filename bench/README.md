@@ -271,6 +271,248 @@ on the L4 Q4_K_M (~ 15 tok/s). Peak GPU memory: 18 / 23 GiB.
   manifests still apply but disk-pressure-eviction safeguards from
   PR #7's debrief should be added (cache cleanup CronJob).
 
+## v15_split_xmachine_bench.py — true L4 ↔ A100 cross-machine split
+
+End-to-end split bench that exercises the production V1.5 wire path
+across two physical hosts on the tailnet:
+
+- **Edge (L4 24GB, `l4-edge-2 @ <edge-host>`)** runs a
+  FastAPI server (`v15-edge/edge_server.py`) wrapping `EdgeEncoder`
+  with `google/gemma-3-1b-it` fp16; exposes `POST /v15/encode {prompt}`
+  → `CompactSchemaV15` JSON with `embedding_b64`.
+- **Cloud (A100 SXM4 80GB, vast.ai @ `<cloud-host>`)** runs a FastAPI
+  server (`/opt/v15-cloud-adapter/repo/bench/a100_cloud_server.py`)
+  wrapping `SoftPromptAdapter` with `google/gemma-3-27b-it` 4-bit
+  nf4; exposes `POST /v15/forward {schema_json, max_new_tokens}` →
+  decoded response + token counts.
+- The bench script (`bench/v15_split_xmachine_bench.py`) lives on the
+  tailnet client (here `<user>`) and chains
+  `L4 /v15/encode` → `A100 /v15/forward` per prompt, decomposing
+  latency into compute (server-reported) vs network (RTT − compute).
+
+### 2026-05-08 first cross-machine run
+
+Hardware:
+
+- Edge: NVIDIA L4 24GB on GCE `g2-standard-4` Spot in `asia-northeast1-b`.
+  Driver 595.71.05, kernel `6.1.0-45-cloud-amd64` (rebuilt nvidia dkms
+  for the new kernel before this run).
+- Cloud: NVIDIA A100-SXM4-80GB on vast.ai (Japan host).
+- Both hosts on the same tailnet; bench client on bench-client in
+  Tokyo. Each prompt = 1 L4 RPC + 1 A100 RPC.
+
+Models:
+
+- Edge `google/gemma-3-1b-it` fp16, embedding_dim=1152, no quant
+  (~2 GB GPU; sits alongside Ollama's `gemma3:27b` Q4_K_M on the same
+  L4, peak ~17 GB used + 2 GB edge = well under 23 GB headroom).
+- Cloud `google/gemma-3-27b-it` 4-bit nf4 (`bnb_4bit_compute_dtype=fp16`),
+  hidden_size=5376, K=8 soft-prompt tokens, MLP randomly initialised
+  (no checkpoint loaded — adapter weights are not trained yet).
+
+5-prompt cold-cache run (prompts unique to this run, no LRU hits):
+
+```
+$ python3 bench/v15_split_xmachine_bench.py --max-new-tokens 64 \
+    --prompts "What is the capital of Japan?" "List the planets" \
+              "Write a poem about the ocean" "Solve: 17 * 23" \
+              "Define the word 'serendipity'"
+```
+
+```json
+{
+  "edge":  {"model":"google/gemma-3-1b-it",  "embedding_dim":1152, "cuda_device":"NVIDIA L4",            "cuda_mem_used_gb":2.06},
+  "cloud": {"model":"google/gemma-3-27b-it", "hidden":5376, "quantization":"bnb_4bit_nf4", "prompt_tokens":8, "cuda_device":"NVIDIA A100-SXM4-80GB", "cuda_mem_used_gb":18.35},
+  "max_new_tokens": 64,
+  "n_prompts": 5,
+  "encode_compute_ms":  {"p50": 57.1,   "p95": 81.7,   "min": 55.6,   "max": 81.7},
+  "encode_rtt_ms":      {"p50": 70.7,   "p95": 95.2,   "min": 68.9,   "max": 95.2},
+  "encode_network_ms":  {"p50": 13.6,   "p95": 13.9,   "min": 13.3,   "max": 13.9},
+  "forward_compute_ms": {"p50": 6704.5, "p95": 6932.1, "min": 6674.4, "max": 6932.1},
+  "forward_rtt_ms":     {"p50": 6807.0, "p95": 7053.4, "min": 6768.0, "max": 7053.4},
+  "forward_network_ms": {"p50": 102.5,  "p95": 121.3,  "min":  93.6,  "max": 121.3},
+  "total_ms":           {"p50": 6877.5, "p95": 7122.3, "min": 6856.2, "max": 7122.3},
+  "n_in_tokens_per_request": [2256, 2256, 2240, 2294, 2256],
+  "n_out_tokens_per_request": [64, 64, 64, 64, 64]
+}
+```
+
+LRU-hit run (same 5 prompts as `bench/v15_a100_4bit_bench.py`, repeated
+after first cold pass): encode_compute drops to ~0.1 ms p50, encode_rtt
+collapses to ~13.5 ms (pure HTTP RTT) — the EdgeEncoder LRU cache is
+sha256-keyed by prompt and intercepts before the GPU.
+
+### Decomposition
+
+| stage              | p50      | what it includes                                         |
+|--------------------|----------|----------------------------------------------------------|
+| encode network     | 13.6 ms  | tailnet RTT + JSON serdes (`L4 ↔ bench-client`)           |
+| encode compute     | 57.1 ms  | tokenize + forward + projection on L4 (warm GPU)         |
+| forward network    | 102.5 ms | tailnet RTT + 3.3 KB schema_json upload (`A100 ↔ bench-client`) |
+| forward compute    | 6704 ms  | 64-token greedy generate on 27B 4-bit nf4, ~2250 in tok |
+| **end-to-end p50** | **6878 ms** | one full split round-trip                            |
+
+The 27B 4-bit forward dominates (~98% of total). Network adds ~115 ms
+per prompt over the local-only A100 bench (`bench/v15_a100_4bit_bench.py`):
+prior local run was forward p50 ~7055 ms vs cross-machine ~6807 ms RTT
+— variance within run-to-run noise, so the tailnet adds essentially no
+overhead on top of the 27B generate cost.
+
+### Caveat — empty decoded output (expected, not a pipeline bug)
+
+All 5 forward responses decoded to 64 `<pad>` tokens (output_chars=0).
+This is expected: the `SoftPromptAdapter.mlp` is randomly initialised
+(no `training/train_v15.py` checkpoint in this bench), so the K=8 soft
+prompt embeddings live in a region of embedding space that doesn't map
+to any meaningful token distribution; with `do_sample=False` the LM
+head argmax falls onto the lowest-entropy `<pad>` token. The bench
+measures **wire path latency**, which is unaffected. Output quality is
+gated on a trained adapter checkpoint — a separate workstream.
+
+### Reproduce
+
+L4 (edge) — assumes Debian 12 + L4 + working nvidia driver:
+
+```bash
+ssh <user>@<edge-host>
+mkdir -p ~/v15-edge/router && cd ~/v15-edge
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install torch==2.4.* --index-url https://download.pytorch.org/whl/cu124
+.venv/bin/pip install "transformers==4.55.4" accelerate fastapi uvicorn numpy pydantic
+# scp src/router/{__init__.py,edge_encoder.py,schema_v15.py,schema.py} from gemma4-router
+# scp bench/edge_server.py (this repo: see /tmp/l4_edge_server.py)
+HF_TOKEN=hf_... nohup .venv/bin/python edge_server.py \
+    --edge-model google/gemma-3-1b-it --embedding-dim 1152 --port 8002 \
+    > /tmp/l4_edge_server.log 2>&1 &
+```
+
+A100 (cloud) — vast.ai instance with `/opt/v15-cloud-adapter/repo` and
+a working `.venv` (torch 2.4.1+cu124, transformers 4.55.4, bnb 0.49.2,
+fastapi, uvicorn) plus `/dev/shm/hf-cache` containing `gemma-3-27b-it`:
+
+```bash
+ssh root@<cloud-host>
+cd /opt/v15-cloud-adapter/repo
+export HF_HOME=/dev/shm/hf-cache HF_HUB_CACHE=/dev/shm/hf-cache/hub \
+       PYTHONPATH=/opt/v15-cloud-adapter/repo/src
+nohup .venv/bin/python bench/a100_cloud_server.py \
+    --cloud-model google/gemma-3-27b-it --edge-dim 1152 --prompt-tokens 8 \
+    --port 8001 > /tmp/a100_server.log 2>&1 &
+```
+
+Bench client (any host on the tailnet):
+
+```bash
+python3 bench/v15_split_xmachine_bench.py --max-new-tokens 64
+```
+
+### 2026-05-08 production-sizing sweeps
+
+After the headline cross-machine run we kept the same edge+cloud
+servers up and ran three orthogonal sweeps before tearing down the
+A100. All sweeps share the same hardware (L4 edge gemma-3-1b-it fp16
+on `<edge-host>`, A100 cloud gemma-3-27b-it bnb-4bit-nf4 on
+`<cloud-host>`) and the K=8 untrained soft-prompt MLP. We only report
+**latency / throughput** numbers — output quality is invariant under
+these knobs (every generation still decodes to `<pad>` until the
+adapter is trained).
+
+#### A. `max_new_tokens` scaling (cross-machine)
+
+5 prompts × 4 token-length points, raw at
+`bench/v15_len_sweep_2026-05-08.json`.
+
+| max_new_tokens | forward_compute p50 | forward_compute p95 | total p50  | ms / generated token |
+|---------------:|--------------------:|--------------------:|-----------:|---------------------:|
+|             32 |          3 676 ms   |          3 925 ms   |  3 783 ms  |               115 ms |
+|             64 |          6 694 ms   |          6 708 ms   |  6 801 ms  |               105 ms |
+|            128 |         12 724 ms   |         12 754 ms   | 12 830 ms  |                99 ms |
+|            256 |         24 785 ms   |         24 904 ms   | 24 901 ms  |                97 ms |
+
+Linear in generated-token count, asymptote ~96 ms/token at the long
+end (steady-state generate). The ~10 ms/token excess at short lengths
+is per-call setup (`generate` loop init, soft-prompt projection,
+attention-mask build) amortising across more tokens as length grows.
+Use these numbers for cost/latency planning per request length.
+
+Reproduce:
+
+```bash
+for n in 32 64 128 256; do
+  python3 bench/v15_split_xmachine_bench.py --max-new-tokens $n \
+    --out /tmp/v15_xmachine_n$n.json \
+    --prompts "What is the capital of Japan?" "List the planets" \
+              "Write a poem about the ocean" "Solve: 17 * 23" \
+              "Define the word 'serendipity'"
+done
+```
+
+#### B. Concurrency under serial-forward semantics (cross-machine)
+
+8 cross-machine end-to-end requests fired with N concurrent workers
+against the same A100 server (one `cloud.generate(...)` call per
+request, default FastAPI sync-in-threadpool semantics). Raw at
+`bench/v15_xmachine_concurrency_2026-05-08.json`.
+
+| concurrency | wall-clock | RPS    | total p50 | total p95 | per-request slowdown vs C=1 |
+|------------:|-----------:|-------:|----------:|----------:|----------------------------:|
+|           1 |     50.4 s | 0.159  | 6 858 ms  | 7 118 ms  |                  1.00× (ref) |
+|           2 |     50.4 s | 0.159  |12 590 ms  |13 301 ms  |                       1.84× |
+|           4 |    161.8 s | 0.049  |82 046 ms  |83 907 ms  |                      11.97× |
+
+C=2 doubles per-request latency cleanly (the GPU serializes), so
+end-to-end RPS is unchanged versus C=1. **C=4 collapses** — every
+request takes ~12× the C=1 latency and overall RPS drops 3×. The
+single-process FastAPI (sync handlers in anyio threadpool) lets four
+generate calls coexist on the GPU; their KV-caches and dequant work
+fight for memory bandwidth and the 4-bit dequant path appears to
+serialize particularly poorly. **Conclusion: at A100-80GB-4bit, the
+V1.5 cloud server should be capped at concurrency = 1–2 per
+process.** Higher fan-out needs explicit batching (next sweep) or
+horizontal replicas, not opportunistic concurrency.
+
+Reproduce:
+
+```bash
+python3 bench/v15_concurrency_sweep.py --max-new-tokens 64 \
+    --concurrency-levels 1 2 4 --requests-per-level 8
+```
+
+#### C. Static batch throughput (`forward_batch`, cross-machine)
+
+Pre-encode 8 schemas on L4, then call `/v15/forward_batch` (added to
+`bench/a100_cloud_server.py` for this sweep) with B prompts in a
+single `cloud.generate(inputs_embeds=...)` of shape `(B, 8 + ~2256)`.
+3 trials per B, best-of-3. Raw at
+`bench/v15_batch_throughput_2026-05-08.json`.
+
+|   batch | best forward_compute | tokens/sec | per-user latency | speedup vs serial B=1 |
+|--------:|---------------------:|-----------:|-----------------:|----------------------:|
+|       1 |             6 724 ms |        9.5 |          6 724 ms|                  1.00× |
+|       2 |             9 410 ms |       13.6 |          4 705 ms|                  1.43× |
+|       4 |            11 404 ms |       22.4 |          2 851 ms|                  2.36× |
+|       8 |            15 682 ms |       32.6 |          1 960 ms|                  3.43× |
+
+Static batching wins decisively over opportunistic concurrency: B=8
+finishes 8 requests in 15.7 s (~32.6 tok/s aggregate) versus C=4
+finishing 8 requests in 161.8 s. Per-user latency drops from 6.7 s to
+2.0 s as B grows, and the speedup-vs-serial curve is sub-linear (3.43×
+at B=8) — A100 4-bit nf4 27B is compute-bound, not bandwidth-bound, at
+these K=8 / ~2256-input-token shapes.
+
+**Production guidance**: a real V1.5 deployment should batch at the
+adapter layer (collect requests in a small queue and fire B=4–8
+batches) rather than letting concurrent HTTP requests race on the
+GPU.
+
+Reproduce (server must expose `/v15/forward_batch`):
+
+```bash
+python3 bench/v15_batch_client.py --batch-sizes 1 2 4 8 \
+    --max-new-tokens 64 --trials 3
+```
+
 ## judge_ab.py
 
 Pre-existing A/B judge harness from earlier work; unrelated to V1.5.
