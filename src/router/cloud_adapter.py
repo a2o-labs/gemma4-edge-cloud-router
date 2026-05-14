@@ -10,10 +10,33 @@ Heavy deps (torch, transformers) are lazy-imported inside methods.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
+
+
+def _strip_schema_embedding(json_text: str) -> str:
+    """Drop ``embedding_b64`` from a CompactSchemaV15 JSON string.
+
+    The embedding crosses the wire so the cloud can rebuild the soft
+    prompt via MLP. Feeding the base64 representation back into the cloud
+    tokenizer would re-encode the same information as ~3000 chars of
+    noise (>90% of the input context budget) — that is the failure mode
+    the IR design is meant to avoid. Strip before tokenizing.
+
+    Non-JSON or schemas without ``embedding_b64`` pass through unchanged
+    so callers can hand arbitrary text to ``forward``/``forward_batch``.
+    """
+    try:
+        obj = json.loads(json_text)
+    except (TypeError, ValueError):
+        return json_text
+    if isinstance(obj, dict) and "embedding_b64" in obj:
+        obj.pop("embedding_b64", None)
+        return json.dumps(obj, separators=(",", ":"))
+    return json_text
 
 if TYPE_CHECKING:
     import torch
@@ -179,6 +202,7 @@ class SoftPromptAdapter:
             edge_vec.shape[0], self.prompt_tokens, self.cloud_hidden
         )
 
+        json_text = _strip_schema_embedding(json_text)
         text_embeds = self._embed_input(json_text)
         if text_embeds.shape[0] != soft.shape[0]:
             text_embeds = text_embeds.expand(soft.shape[0], -1, -1)
@@ -220,6 +244,7 @@ class SoftPromptAdapter:
 
         soft = self.mlp(edge_vecs).reshape(B, self.prompt_tokens, self.cloud_hidden)
 
+        json_texts = [_strip_schema_embedding(t) for t in json_texts]
         tok = self.tokenizer(
             json_texts, return_tensors="pt", padding=True, truncation=False
         )
@@ -272,6 +297,7 @@ class SoftPromptAdapter:
         soft = self.mlp(edge_vec).reshape(
             edge_vec.shape[0], self.prompt_tokens, self.cloud_hidden
         )
+        json_text = _strip_schema_embedding(json_text)
         text_embeds = self._embed_input(json_text)
         if text_embeds.shape[0] != soft.shape[0]:
             text_embeds = text_embeds.expand(soft.shape[0], -1, -1)
