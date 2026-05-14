@@ -41,6 +41,16 @@ All notable changes to gemma4-router are documented here.
   for VQ-style IR; PR #34+ to explore on-manifold projection,
   partial-cloud finetune, and residual-correction (vs summation)
   variants.
+- `src/router/quantization_aware.py` — quantization-aware IR:
+  symmetric per-token fake quantization at int8 / int4 with
+  straight-through estimator. Different attack angle than VQ-VAE
+  (per-dim scalar quantization, codebook-free, no off-manifold
+  summation). Helpers for both training-time fake-quantize and
+  wire-side real-quantize/dequantize. 8 unit tests.
+- `training/train_v15_qat.py` — paper-companion training with
+  fake-quantize applied to MLP soft prompt before the cloud LM.
+  `--qat-bits` flag picks 4 or 8. Wire payload at K=32, hidden=1152
+  drops from 73 KB fp16 → 36 KB int8 → 18 KB int4.
 
 ### Infrastructure
 
