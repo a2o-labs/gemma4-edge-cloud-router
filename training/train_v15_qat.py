@@ -138,6 +138,7 @@ def main():
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--qat-bits", type=int, default=8, choices=[4, 8])
+    ap.add_argument("--resume-from", default=None, help="checkpoint .pt to warm-start MLP + projection from")
     ap.add_argument("--aux-ce-weight", type=float, default=1.0)
     ap.add_argument("--aux-kl-weight", type=float, default=0.05)
     ap.add_argument("--aux-contrastive-weight", type=float, default=0.1)
@@ -203,6 +204,12 @@ def main():
         f"[qat] wire payload: fp16={fp16_bytes} B  qat-{args.qat_bits}bit={qat_bytes} B "
         f"({fp16_bytes / qat_bytes:.1f}x reduction)"
     )
+
+    if args.resume_from:
+        ck = torch.load(args.resume_from, map_location="cuda", weights_only=False)
+        edge.projection.load_state_dict(ck["projection_state"])
+        adapter.mlp.load_state_dict(ck["mlp_state"])
+        print(f"[resume] loaded MLP + projection from {args.resume_from} (step={ck.get('step')})")
 
     params = list(edge.trainable_parameters()) + list(adapter.trainable_parameters())
     optim = torch.optim.AdamW(params, lr=cfg.learning_rate)

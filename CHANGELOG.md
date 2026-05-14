@@ -51,6 +51,18 @@ All notable changes to gemma4-router are documented here.
   fake-quantize applied to MLP soft prompt before the cloud LM.
   `--qat-bits` flag picks 4 or 8. Wire payload at K=32, hidden=1152
   drops from 73 KB fp16 → 36 KB int8 → 18 KB int4.
+- `training/train_v15_qat.py` `--resume-from` flag — warm-start MLP
+  + projection from a previous checkpoint. Used to split the
+  Gemma 4 26B-A4B 10k-step run across an A100 session boundary.
+- `docs/v15-gemma4-26b-a4b-results.md` — 1B-ceiling hypothesis test:
+  same edge + same K=32 QAT int8 + ~9 000 effective steps, only swap
+  cloud to Gemma 4 26B-A4B-it (4-bit nf4 bf16). First on-topic
+  haiku ("Softly, the rain falls…") with self-aware meta-commentary,
+  real 2024 demographics from "list" prompts, but cross-prompt
+  capital-attractor collapse appeared at step 9 000 that wasn't
+  there at step 4 000. Verdict: 1B edge + 5 000-sample distilled set
+  are the next-binding ceilings; cloud quality is no longer the
+  blocker.
 
 ### Infrastructure
 
