@@ -84,3 +84,16 @@ class V15RouteResponse(BaseModel):
     embedding_dim: int
     complexity: Literal["light", "heavy"]
     latency_ms: float | None = None
+
+
+class AdaptiveRouteResponse(BaseModel):
+    task_id: str
+    chosen_path: Literal["v1", "v15"]
+    answer: str
+    prompt_tokens: int
+    threshold: int
+    decision_reason: str
+    latency_ms: float | None = None
+    classifier_confidence: float | None = None
+    embedding_dim: int | None = None
+    complexity: Literal["light", "heavy"] | None = None

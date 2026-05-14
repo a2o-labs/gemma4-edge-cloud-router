@@ -21,6 +21,7 @@ from .edge_executor import EdgeExecutor
 from .encoder import Encoder, MaskMap
 from .middleware import CombinedRouteGuard
 from .schema import (
+    AdaptiveRouteResponse,
     RouteRequest,
     RouteResponse,
     V15RouteRequest,
@@ -28,6 +29,7 @@ from .schema import (
 )
 from .telemetry import Telemetry, get_tracer, setup_otel
 from .v15_pipeline import V15Pipeline
+from .adaptive_router import decide_path, make_token_count_fn
 
 log = logging.getLogger("router")
 
@@ -259,6 +261,107 @@ async def route_v15_stream(req: V15RouteRequest) -> StreamingResponse:
                 break
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/route/auto", response_model=AdaptiveRouteResponse)
+async def route_auto(req: RouteRequest) -> AdaptiveRouteResponse:
+    """Adaptive V1.0/V1.5 dispatch.
+
+    Counts the prompt's tokens with the V1.5 cloud tokenizer (or a chars/4
+    fallback when V1.5 isn't loaded) and dispatches to whichever path is
+    cheaper. The crossover threshold defaults to 92 tokens — fixed cost of
+    a stripped V1.5 schema (~84 metadata tokens + K=8 soft prompt). Below
+    that the V1.0 raw-prompt path is cheaper and faster; above it V1.5's
+    fixed-size IR pays off.
+    """
+    settings = get_settings().v15
+    if not settings.adaptive_routing_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="adaptive routing disabled (set V15_ADAPTIVE_ROUTING_ENABLED=true)",
+        )
+    pipeline: V15Pipeline = app.state.v15_pipeline
+    decision = decide_path(
+        req.prompt,
+        token_count_fn=make_token_count_fn(pipeline),
+        threshold=settings.adaptive_routing_token_threshold,
+        v15_ready=pipeline.is_ready(),
+    )
+
+    tracer = get_tracer()
+    start = time.perf_counter()
+    with tracer.start_as_current_span("route.auto") as span:
+        span.set_attribute("chosen_path", decision.path)
+        span.set_attribute("prompt_tokens", decision.prompt_tokens)
+        span.set_attribute("threshold", decision.threshold)
+        span.set_attribute("decision_reason", decision.reason)
+
+        if decision.path == "v15":
+            try:
+                schema, answer = pipeline.run(req.prompt)
+            except Exception as exc:
+                span.record_exception(exc)
+                log.exception("V1.5 pipeline error on /route/auto")
+                raise HTTPException(
+                    status_code=502, detail=f"v1.5 pipeline error: {exc}"
+                ) from exc
+            latency_ms = (time.perf_counter() - start) * 1000
+            app.state.telemetry.record(
+                path="v1.5", latency_ms=latency_ms, classifier_fell_back=False
+            )
+            return AdaptiveRouteResponse(
+                task_id=schema.task_id,
+                chosen_path="v15",
+                answer=answer,
+                prompt_tokens=decision.prompt_tokens,
+                threshold=decision.threshold,
+                decision_reason=decision.reason,
+                latency_ms=round(latency_ms, 2),
+                embedding_dim=schema.embedding_dim,
+                complexity=schema.complexity,
+            )
+
+        # V1 path — reuse the same flow as /route, force=auto.
+        classifier = app.state.classifier
+        encoder: Encoder = app.state.encoder
+        decoder: Decoder = app.state.decoder
+        forwarder: CloudForwarder = app.state.cloud_forwarder
+        edge_exec: EdgeExecutor = app.state.edge_executor
+
+        result = await classifier.classify(req.prompt)
+        complexity = result.complexity
+        confidence = result.confidence
+        task_type = result.task_type
+        try:
+            if complexity == "light":
+                answer = await edge_exec.answer(req.prompt)
+                task_id = uuid.uuid4().hex
+            else:
+                task = encoder.encode(req.prompt, session_id=req.session_id or uuid.uuid4().hex, task_type=task_type)
+                task_id = task.task_id
+                cloud_answer = await forwarder.forward(task)
+                answer = decoder.decode(req.session_id or task_id, cloud_answer)
+        except httpx.HTTPError as exc:
+            span.record_exception(exc)
+            log.exception("upstream error on /route/auto v1 path")
+            raise HTTPException(
+                status_code=502, detail=f"upstream {complexity} error: {exc}"
+            ) from exc
+
+        latency_ms = (time.perf_counter() - start) * 1000
+        app.state.telemetry.record(
+            path=complexity, latency_ms=latency_ms, classifier_fell_back=result.fell_back
+        )
+        return AdaptiveRouteResponse(
+            task_id=task_id,
+            chosen_path="v1",
+            answer=answer,
+            prompt_tokens=decision.prompt_tokens,
+            threshold=decision.threshold,
+            decision_reason=decision.reason,
+            latency_ms=round(latency_ms, 2),
+            classifier_confidence=confidence,
+        )
 
 
 def run() -> None:

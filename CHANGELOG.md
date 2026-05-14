@@ -4,6 +4,19 @@ All notable changes to gemma4-router are documented here.
 
 ## Unreleased
 
+### V1.5
+
+- `POST /route/auto` — adaptive V1.0/V1.5 dispatch. Counts the prompt's
+  cloud-tokenizer tokens and routes to V1.5 only when prompt > threshold
+  (default 92, the empirical V1.0/V1.5 crossover). Gated by
+  `V15_ADAPTIVE_ROUTING_ENABLED=true`. New `src/router/adaptive_router.py`
+  + 9 unit tests.
+- `docs/v15-1b-baseline-results.md` — write-up of the 2026-05-08 / 05-09
+  1B/1B baseline run: K sweep (K=4/8/16/32), auxiliary losses
+  (CE + KL distillation + contrastive), 5000-sample alpaca→gemma3:4b
+  distillation, and the breakthrough on the K=32 + aux + 5k checkpoint
+  (first factually-correct answer, first format-perfect haiku).
+
 ### Infrastructure
 
 - **L4 edge endpoint migrated** from `l4-edge-1 @ <redacted-tailnet-ip>`

@@ -52,6 +52,9 @@ class V15Settings(BaseSettings):
     mock_mode: bool = False
     classifier_min_confidence: float = 0.5
 
+    adaptive_routing_enabled: bool = False
+    adaptive_routing_token_threshold: int = 92
+
 
 class MiddlewareSettings(BaseSettings):
     model_config = SettingsConfigDict(
