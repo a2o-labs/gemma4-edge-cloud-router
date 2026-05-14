@@ -4,18 +4,25 @@ All notable changes to gemma4-router are documented here.
 
 ## Unreleased
 
-### V1.5
+### V1.5 follow-up — VQ-VAE codebook + cross-tokenizer
 
-- `POST /route/auto` — adaptive V1.0/V1.5 dispatch. Counts the prompt's
-  cloud-tokenizer tokens and routes to V1.5 only when prompt > threshold
-  (default 92, the empirical V1.0/V1.5 crossover). Gated by
-  `V15_ADAPTIVE_ROUTING_ENABLED=true`. New `src/router/adaptive_router.py`
-  + 9 unit tests.
-- `docs/v15-1b-baseline-results.md` — write-up of the 2026-05-08 / 05-09
-  1B/1B baseline run: K sweep (K=4/8/16/32), auxiliary losses
-  (CE + KL distillation + contrastive), 5000-sample alpaca→gemma3:4b
-  distillation, and the breakthrough on the K=32 + aux + 5k checkpoint
-  (first factually-correct answer, first format-perfect haiku).
+- `src/router/vector_quantizer.py` — `VectorQuantizer` module with
+  EMA-updated codebook, straight-through estimator, dead-code revival.
+  4096 / 256 codebooks trained on the 1B/1B baseline; both converge
+  to ~60 actively-used codes (clean negative result documented in
+  `docs/v15-vqvae-and-cross-tokenizer-results.md`). 7 unit tests in
+  `tests/test_vector_quantizer.py`.
+- `training/train_v15_aux.py` — paper-companion training script with
+  CE + KL distillation + contrastive auxiliary losses (BLIP-2 §3
+  inspired). Halved final CE on the 1B baseline (1.01 → 0.508).
+- `training/train_v15_vqvae.py` — same loop with the vector
+  quantizer wired in.
+- `docs/v15-vqvae-and-cross-tokenizer-results.md` — write-up of the
+  cross-tokenizer experiment (gemma-3-1b-it → Qwen2.5-3B-Instruct,
+  validated, factual answer + haiku format) and the VQ-VAE codebook
+  failure mode (~60 effectively-used codes regardless of codebook
+  size, generation degenerates below continuous baseline). Lists
+  Residual VQ + k-means warmup as the natural follow-up.
 
 ### Infrastructure
 
