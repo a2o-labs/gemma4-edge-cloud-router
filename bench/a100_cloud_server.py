@@ -12,7 +12,6 @@ extract embedding_b64, decode to numpy float16 vector, run forward.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import time
 

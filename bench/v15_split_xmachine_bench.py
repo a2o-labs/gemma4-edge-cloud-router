@@ -68,7 +68,7 @@ def main() -> None:
     p.add_argument("--out", default="/tmp/v15_xmachine_bench.json")
     args = p.parse_args()
 
-    print(f"=== V1.5 cross-machine split bench ===")
+    print("=== V1.5 cross-machine split bench ===")
     print(f"  edge_url  = {args.edge_url}")
     print(f"  cloud_url = {args.cloud_url}")
 
