@@ -4,6 +4,32 @@ All notable changes to gemma4-router are documented here.
 
 ## Unreleased
 
+### V1.5 bench + production fixes
+
+- `bench/v15_split_xmachine_bench.py` + `bench/a100_cloud_server.py` +
+  `bench/l4_edge_server.py` — cross-machine L4↔A100 V1.5 split bench
+  harness, with production-sizing sweeps (length / concurrency / batch).
+  First cross-machine end-to-end validation of the schema_v15 wire
+  format on real GPUs. (#28)
+- `_strip_schema_embedding()` in `src/router/cloud_adapter.py` — drops
+  `embedding_b64` from `forward` / `forward_batch` / `forward_stream`
+  before the cloud tokenizer sees it. 24.5× input compression vs the
+  pre-fix buggy state; unblocks real text output instead of all-`<pad>`.
+  +unit tests. (#29)
+
+### V1.5 adaptive routing
+
+- `POST /route/auto` — adaptive V1.0/V1.5 dispatch. Counts the prompt's
+  cloud-tokenizer tokens and routes to V1.5 only when prompt > threshold
+  (default 92, the empirical V1.0/V1.5 crossover). Gated by
+  `V15_ADAPTIVE_ROUTING_ENABLED=true`. New `src/router/adaptive_router.py`
+  + 9 unit tests.
+- `docs/v15-1b-baseline-results.md` — write-up of the 2026-05-08 / 05-09
+  1B/1B baseline run: K sweep (K=4/8/16/32), auxiliary losses
+  (CE + KL distillation + contrastive), 5000-sample alpaca→gemma3:4b
+  distillation, and the breakthrough on the K=32 + aux + 5k checkpoint
+  (first factually-correct answer, first format-perfect haiku). (#31)
+
 ### V1.5 follow-up — VQ-VAE codebook + cross-tokenizer
 
 - `src/router/vector_quantizer.py` — `VectorQuantizer` module with
@@ -63,6 +89,23 @@ All notable changes to gemma4-router are documented here.
   there at step 4 000. Verdict: 1B edge + 5 000-sample distilled set
   are the next-binding ceilings; cloud quality is no longer the
   blocker.
+
+### Research (compiler-IR retrieval, ACL 2027 target)
+
+- `docs/paper-compiler-ir-retrieval.md` — paper outline. Thesis:
+  compiler-IR embeddings retrieve semantically-equivalent-but-
+  syntactically-different code neighbours that AST and token
+  embeddings miss, measured extrinsically by how much they
+  accelerate an LLM-driven evolutionary code search.
+  Decisions logged: ACL 2027, a2o-labs affiliation, Gemma 4 31B-it
+  for Phase 2 extrinsic eval, L4 for Phase 0–1. (#36)
+- `research/p0-compiler-ir-retrieval/` — Phase 0 closeout:
+  `lit-review.md` (13 papers across 3 literatures; gap defensible),
+  `humaneval-coverage-spike.md` + `humaneval_repr_spike.py` +
+  `results/compile_coverage.json` (100 % HumanEval coverage on
+  tokens / AST / Python bytecode; sizes inside encoder budgets),
+  `extended-abstract.md` (2-page draft, recommends green-light
+  Phase 1). (#40)
 
 ### Infrastructure
 
