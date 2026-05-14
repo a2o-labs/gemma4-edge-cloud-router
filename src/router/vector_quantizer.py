@@ -198,3 +198,158 @@ class VectorQuantizer:
             # Reset their EMA stats so they participate fresh.
             self.cluster_size[dead] = 1.0
             self.embed_sum[dead] = self.codebook[dead]
+
+    def warmup_kmeans(self, samples: "torch.Tensor", n_iters: int = 10) -> None:
+        """K-means warmup: replace random codebook init with cluster centers
+        of ``samples``.
+
+        Solves the cold-start collapse where random codebook entries are far
+        from any MLP output, leading to all assignments concentrating on a
+        single nearest code. Call once before training begins, with a batch
+        of representative MLP outputs.
+
+        ``samples`` should be ``(N, code_dim)`` with ``N >> num_codes``.
+        """
+        torch, _ = _load_torch()
+        flat = samples.reshape(-1, self.cfg.code_dim).detach()
+        if flat.shape[0] < self.cfg.num_codes:
+            # Not enough samples to seed all codes — fall back to random
+            # plus replicate.
+            reps = (self.cfg.num_codes + flat.shape[0] - 1) // flat.shape[0]
+            flat = flat.repeat(reps, 1)[: self.cfg.num_codes]
+        with torch.no_grad():
+            # Init: pick num_codes random samples as initial centers.
+            perm = torch.randperm(flat.shape[0], device=flat.device)
+            centers = flat[perm[: self.cfg.num_codes]].to(self.codebook.dtype).clone()
+            for _ in range(n_iters):
+                # Assignment step.
+                x_sq = (flat * flat).sum(dim=-1, keepdim=True)
+                e_sq = (centers * centers).sum(dim=-1)
+                dist = x_sq + e_sq - 2.0 * flat @ centers.t()
+                idx = dist.argmin(dim=-1)
+                # Update step: new center = mean of assigned points (with
+                # fallback to old center for empty clusters).
+                onehot = torch.zeros(
+                    flat.shape[0], self.cfg.num_codes, device=flat.device, dtype=flat.dtype
+                )
+                onehot.scatter_(1, idx.unsqueeze(1), 1.0)
+                cluster_count = onehot.sum(dim=0)
+                cluster_sum = onehot.t() @ flat
+                # Avoid division by zero — keep old center for empty clusters.
+                mask = cluster_count > 0
+                new_centers = centers.clone()
+                new_centers[mask] = (
+                    cluster_sum[mask] / cluster_count[mask].unsqueeze(1)
+                ).to(centers.dtype)
+                centers = new_centers
+            self.codebook = centers
+            # Seed EMA stats so existing-code regions don't get wiped out by
+            # the first training step's update.
+            self.cluster_size = torch.ones(self.cfg.num_codes, device=centers.device, dtype=flat.dtype)
+            self.embed_sum = self.codebook.clone()
+
+
+@dataclass
+class RVQConfig:
+    """Residual VQ: ``n_layers`` stacked quantizers, each on the residual
+    of the previous. Effective bandwidth = sum of layer-bits.
+    """
+
+    n_layers: int = 4
+    num_codes_per_layer: int = 256
+    code_dim: int = 1152
+    decay: float = 0.99
+    eps: float = 1e-5
+    commit_weight: float = 0.25
+    revive_every: int = 200
+    dead_threshold: float = 0.5
+
+    def effective_bits_per_token(self) -> float:
+        import math
+
+        return self.n_layers * math.log2(self.num_codes_per_layer)
+
+
+class ResidualVectorQuantizer:
+    """Stack of ``n_layers`` VectorQuantizers, each operating on the residual
+    of the previous layer's output.
+
+    Effective channel size is ``n_layers * log2(num_codes_per_layer)`` bits
+    per token, vs ``log2(num_codes)`` for a single VQ. Standard in audio
+    codecs (SoundStream, Encodec) for the same reason: a single 8-bit code
+    is too coarse to reconstruct natural distributions.
+    """
+
+    def __init__(self, cfg: RVQConfig | None = None, **kwargs) -> None:
+        self.cfg = cfg or RVQConfig(**kwargs)
+        self.layers = [
+            VectorQuantizer(VQConfig(
+                num_codes=self.cfg.num_codes_per_layer,
+                code_dim=self.cfg.code_dim,
+                decay=self.cfg.decay,
+                eps=self.cfg.eps,
+                commit_weight=self.cfg.commit_weight,
+                revive_every=self.cfg.revive_every,
+                dead_threshold=self.cfg.dead_threshold,
+            ))
+            for _ in range(self.cfg.n_layers)
+        ]
+
+    def to(self, *, device, dtype=None) -> "ResidualVectorQuantizer":
+        for layer in self.layers:
+            layer.to(device=device, dtype=dtype)
+        return self
+
+    def state_dict(self) -> dict:
+        return {
+            "layers": [layer.state_dict() for layer in self.layers],
+            "cfg": self.cfg.__dict__,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        for layer, layer_state in zip(self.layers, state["layers"]):
+            layer.load_state_dict(layer_state)
+
+    def __call__(self, x, training: bool = True):
+        torch, _ = _load_torch()
+        residual = x
+        accumulated = torch.zeros_like(x)
+        all_indices = []
+        commit_total = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        codebook_total = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        utilization_per_layer = []
+        for layer in self.layers:
+            q_layer, info = layer(residual, training=training)
+            # Standard RVQ: residual_{t+1} = residual_t - q_t (using true q,
+            # not straight-through, for the residual flow).
+            with torch.no_grad():
+                residual_update = residual - q_layer
+            accumulated = accumulated + q_layer
+            residual = residual_update
+            all_indices.append(info["indices"])
+            commit_total = commit_total + info["commit_loss"]
+            codebook_total = codebook_total + info["codebook_loss"]
+            utilization_per_layer.append(info["utilization"])
+        return accumulated, {
+            "indices_per_layer": all_indices,
+            "commit_loss": commit_total / max(1, len(self.layers)),
+            "codebook_loss": codebook_total / max(1, len(self.layers)),
+            "utilization_per_layer": utilization_per_layer,
+            "utilization": sum(utilization_per_layer) / max(1, len(utilization_per_layer)),
+        }
+
+    def warmup_kmeans(self, samples, n_iters: int = 10) -> None:
+        """Warmup each layer in sequence: layer 0 on samples, layer 1 on
+        residual after layer 0, etc."""
+        torch, _ = _load_torch()
+        residual = samples.reshape(-1, self.cfg.code_dim).detach().clone()
+        for layer in self.layers:
+            layer.warmup_kmeans(residual, n_iters=n_iters)
+            with torch.no_grad():
+                # Compute assignments + residuals for the next layer.
+                x_sq = (residual * residual).sum(dim=-1, keepdim=True)
+                cb = layer.codebook.to(residual.dtype)
+                e_sq = (cb * cb).sum(dim=-1)
+                dist = x_sq + e_sq - 2.0 * residual @ cb.t()
+                idx = dist.argmin(dim=-1)
+                residual = residual - cb[idx]

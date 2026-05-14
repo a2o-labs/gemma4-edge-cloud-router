@@ -23,6 +23,24 @@ All notable changes to gemma4-router are documented here.
   failure mode (~60 effectively-used codes regardless of codebook
   size, generation degenerates below continuous baseline). Lists
   Residual VQ + k-means warmup as the natural follow-up.
+- `ResidualVectorQuantizer` + `RVQConfig` in
+  `src/router/vector_quantizer.py`: stack of N quantizers operating
+  on layer-i residuals, effective bandwidth = sum of layer-bits.
+- `VectorQuantizer.warmup_kmeans()`: k-means init from a sample of
+  representative MLP outputs to defeat cold-start codebook collapse.
+- `training/train_v15_vqvae.py` gains `--use-rvq`, `--rvq-layers`,
+  `--kmeans-warmup`, `--kmeans-warmup-batches` flags.
+- 5 new RVQ + warmup unit tests in `tests/test_vector_quantizer.py`
+  (12 total, all CPU-only).
+- Empirical finding documented at the bottom of
+  `docs/v15-vqvae-and-cross-tokenizer-results.md`: RVQ + warmup
+  drops final CE from 1.46 → 0.996 (32 % better than naive VQ),
+  but bench inference *degrades* — the residual-sum representation
+  drifts off the cloud LM's natural input-embedding manifold.
+  Train/inference manifold mismatch is the new headline blocker
+  for VQ-style IR; PR #34+ to explore on-manifold projection,
+  partial-cloud finetune, and residual-correction (vs summation)
+  variants.
 
 ### Infrastructure
 

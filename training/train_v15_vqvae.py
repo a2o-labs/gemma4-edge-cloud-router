@@ -130,6 +130,10 @@ def main():
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--num-codes", type=int, default=4096)
+    ap.add_argument("--use-rvq", action="store_true", help="use ResidualVectorQuantizer instead of single VQ")
+    ap.add_argument("--rvq-layers", type=int, default=4)
+    ap.add_argument("--kmeans-warmup", action="store_true", help="run k-means on first batch's MLP outputs to seed codebook")
+    ap.add_argument("--kmeans-warmup-batches", type=int, default=8, help="how many batches of MLP output to gather for k-means")
     ap.add_argument("--aux-ce-weight", type=float, default=1.0)
     ap.add_argument("--aux-commit-weight", type=float, default=0.25)
     ap.add_argument("--aux-kl-weight", type=float, default=0.05)
@@ -163,7 +167,12 @@ def main():
     print(f"[data] {n} samples -> {converted_path}")
 
     from training.train_v15 import TrainConfig, build_pipeline, load_jsonl
-    from router.vector_quantizer import VectorQuantizer, VQConfig
+    from router.vector_quantizer import (
+        RVQConfig,
+        ResidualVectorQuantizer,
+        VectorQuantizer,
+        VQConfig,
+    )
 
     cfg = TrainConfig(
         edge_model=args.edge_model,
@@ -188,14 +197,45 @@ def main():
     edge.freeze_base()
     adapter.freeze_base()
 
-    vq = VectorQuantizer(VQConfig(num_codes=args.num_codes, code_dim=adapter.cloud_hidden))
+    if args.use_rvq:
+        vq = ResidualVectorQuantizer(RVQConfig(
+            n_layers=args.rvq_layers,
+            num_codes_per_layer=args.num_codes,
+            code_dim=adapter.cloud_hidden,
+        ))
+        print(f"[vq] RVQ n_layers={args.rvq_layers} num_codes_per_layer={args.num_codes} "
+              f"code_dim={adapter.cloud_hidden} effective_bits={args.rvq_layers * (args.num_codes - 1).bit_length():.0f}")
+    else:
+        vq = VectorQuantizer(VQConfig(num_codes=args.num_codes, code_dim=adapter.cloud_hidden))
+        print(f"[vq] num_codes={args.num_codes}  code_dim={adapter.cloud_hidden}")
     vq.to(device=device, dtype=torch.bfloat16)
-    print(f"[vq] num_codes={args.num_codes}  code_dim={adapter.cloud_hidden}")
+
+    train_data = load_jsonl(cfg.train_jsonl)
+
+    if args.kmeans_warmup:
+        print(f"[vq] gathering {args.kmeans_warmup_batches} batches of MLP output for k-means warmup...")
+        with torch.no_grad():
+            warmup_outputs = []
+            for _ in range(args.kmeans_warmup_batches):
+                idxs = np.random.choice(len(train_data), size=cfg.batch_size, replace=False).tolist()
+                _samples = [train_data[i] for i in idxs]
+                edge_vecs = []
+                for s in _samples:
+                    ids = edge._tokenize(s["prompt"])
+                    attn = torch.ones_like(ids)
+                    out = edge.base(input_ids=ids, attention_mask=attn, output_hidden_states=True, use_cache=False)
+                    edge_vecs.append(edge.projection(out.hidden_states[-1][:, -1, :]))
+                edge_vec = torch.cat(edge_vecs, dim=0)
+                soft = adapter.mlp(edge_vec).reshape(-1, adapter.prompt_tokens, adapter.cloud_hidden)
+                warmup_outputs.append(soft.reshape(-1, adapter.cloud_hidden))
+            warmup_tensor = torch.cat(warmup_outputs, dim=0)
+        print(f"[vq] running k-means on {warmup_tensor.shape[0]} samples × {warmup_tensor.shape[1]} dim")
+        vq.warmup_kmeans(warmup_tensor, n_iters=10)
+        print("[vq] k-means warmup done")
 
     params = list(edge.trainable_parameters()) + list(adapter.trainable_parameters())
     optim = torch.optim.AdamW(params, lr=cfg.learning_rate)
 
-    train_data = load_jsonl(cfg.train_jsonl)
     weights = {
         "ce": args.aux_ce_weight,
         "commit": args.aux_commit_weight,

@@ -167,19 +167,181 @@ This is a *paper-worthy negative result*: it identifies **codebook
 utilization × log₂(num_codes) as the new metric to optimise**,
 not raw `num_codes`. It also shapes the natural follow-ups.
 
-## Follow-up (next PR)
+## Follow-up — RVQ + k-means warmup (PR #33)
 
-`PR #33` will explore both:
+After PR #32 was merged, both ideas were prototyped (`PR #33`,
+`feat/v15-rvq-kmeans-warmup`). The implementation extends the same
+training loop with a `--use-rvq --rvq-layers N --kmeans-warmup`
+flag set. RVQ uses 4 stacked quantizers × 256 codes each (32
+effective bits/token, vs ~6 bits in the naive VQ run); k-means
+warmup gathers 8 batches of MLP output before training and seeds
+each codebook layer with cluster centers.
 
-1. **Residual VQ (RVQ).** Stack 4 quantizers, each operating on the
-   residual of the previous. Effective bandwidth = sum of layer
-   bits, e.g. `4 × log2(256) = 32` bits per soft-prompt token, vs
-   the current `~6` bits. Used in SoundStream / Encodec.
-2. **K-means warmup.** Before training, run k-means on a sample of
-   MLP outputs to seed the codebook in the right region of the
-   manifold. Solves cold-start collapse.
+### Training metric — better than naive VQ
 
-Both are well-precedented. Targeting a 2-week sprint.
+| metric                | VQ-256 (no warmup)  | RVQ-4×256 + warmup |
+|-----------------------|--------------------:|-------------------:|
+| step-3000 CE          | 1.46                | **0.996** (-32 %)  |
+| min CE seen           | ~0.81               | **0.754**          |
+| step-3000 utilization | 22.7 % (single)     | 7.7 % per layer    |
+
+K-means warmup gets layer-1 utilization up to ~6 % at step 1
+(warm-started, vs cold-start at <1 %). Training-loss-wise this is
+an unambiguous win: the model fits the targets noticeably better.
+
+### Inference quality — surprisingly *worse* than naive VQ
+
+Same 8-prompt bench, RVQ + warmup checkpoint at step 3000:
+
+- "Capital of Japan?" / "Capital of France?" → identical zero-width-joiner spam, no English answer
+- "Hamlet?" → unrelated essay about the word "ephemeral"
+- "What is 2+2?" / "Write a haiku" → degenerate punctuation/symbol loops
+- "Translate" / "Summarize" → `import random` python boilerplate (mode collapse on a different attractor)
+
+Tested also on the step-2000 checkpoint (better intermediate CE):
+same kind of degeneracy, just landing on a different attractor
+(python `import random` for 2/8 prompts, factual hallucination for
+others).
+
+### Why training loss decoupled from inference
+
+The RVQ output is a *sum* of layer-i codebook entries, not a single
+nearest-neighbour. While that lets RVQ approximate any continuous
+target arbitrarily closely (32-bit channel reconstructs ~unit-Gaussian
+inputs to err < 1 in the unit test), the **summed output drifts off
+the cloud LM's natural input-embedding manifold**:
+
+- During training the cloud is teacher-forced on `[K_RVQ, target]`,
+  so it learns to predict targets even from off-manifold prefixes —
+  CE drops.
+- At inference the cloud sees only `[K_RVQ]` and must autoregress
+  with no anchor. Off-manifold prefix → no path back to natural
+  text → mode collapse on whatever attractor lies near the RVQ
+  output.
+
+The continuous baseline doesn't suffer this because the MLP output
+is a smooth low-frequency function of `edge_vec`. The naive single-
+VQ also sits closer to natural embeddings (single codebook entry,
+not a sum).
+
+This is a real paper finding: **RVQ-style summation breaks the
+straight-through-VQ ↔ frozen-cloud-LM contract that single-VQ
+preserves**. Standard mitigations:
+
+1. **Project sum back onto natural manifold** — train a thin
+   "denoise" MLP after RVQ that maps the sum to the closest valid
+   embedding (similar to soundstream's decoder).
+2. **Train cloud (or part of cloud) on RVQ outputs** — abandons
+   the frozen-cloud constraint but matches the train/inference
+   distribution.
+3. **Replace residual *summation* with residual *correction*** —
+   layer-i predicts a delta in MLP-output space, not a contribution
+   to the prefix. Keeps the prefix on a single nearest-neighbour
+   manifold.
+4. **Per-layer freeze with sequential training** — train layer 1
+   alone first; once converged, freeze and train layer 2 on its
+   residual; repeat. May avoid the multi-layer compounding drift.
+
+These are PR #34+ material. The negative result here is enough to
+ship the PR — it formalises the train/inference manifold mismatch
+as the new headline blocker, beyond the earlier
+codebook-utilisation finding.
+
+### Bench artifacts (RVQ run)
+
+- `final_rvq_warmup.pt` — step-3000 checkpoint
+- `rvq_warmup_step2000.pt` — intermediate, lowest CE seen
+- `v15_xmachine_rvq_warmup.json` — bench JSON, step 3000
+- `v15_xmachine_rvq_step2k.json` — bench JSON, step 2000
+- `v15_train_rvq_warmup.log` — full training trace, including
+  k-means warmup phase
+
+## Direction-3 spike A — single-VQ + k-means warmup + commit 1.0
+
+To isolate "is the RVQ residual *summation* the issue, or is the
+problem deeper", we re-ran with only the elements that PR #33
+plausibly fixed (warmup + dense codebook + strong commitment) but
+**without** the residual stack. Single VQ with `--num-codes 4096
+--kmeans-warmup --aux-commit-weight 1.0`. Cloud sees one nearest-
+neighbour codebook entry per soft-prompt slot — guaranteed
+on-manifold.
+
+Training: CE 1.008 final (basically tied with RVQ's 0.996),
+utilisation collapses back to 1.6 % (~65 effective codes — the
+warmup head-start at step 1 is reabsorbed by the high-commit
+gradient pulling MLP outputs onto the same codes).
+
+Inference (same 8-prompt bench):
+
+- 3/8 prompts emit an identical "Okay, let's break down the concept
+  of 'irony' in a way that's easy to understand…" passage.
+- 1/8 emits "cognitive dissonance" instead — a similar boilerplate.
+- 4/8 emit short sentence-grammar lectures ("The sentence is
+  grammatically correct…").
+- Zero correct answers; zero format-perfect haikus.
+
+So a different failure mode than RVQ — clean *single-attractor*
+mode collapse — but the same end state: unusable.
+
+### Combined diagnosis
+
+Both regressions confirm the manifold-mismatch finding from PR #33
+*and* extend it: even with on-manifold codes (single nearest-
+neighbour), the soft-prompt **information bandwidth** is the
+binding constraint. With K=32 soft-prompt slots and only ~65
+effectively-used codes, the cloud LM sees nearly the same prefix
+across many prompts → mode collapses onto a single attractor in
+its own continuation distribution.
+
+The continuous IR has ~590 000 bits/token of channel capacity. Any
+naive VQ scheme so far has yielded effectively a few hundred
+distinct prefixes for the entire prompt distribution — too few to
+discriminate. Two compounding issues:
+
+1. **Codebook utilisation × log₂(num_codes) caps low** — single VQ
+   stuck at ~6 bits per soft-prompt slot regardless of nominal
+   codebook size or warmup. EMA training has a strong attractor
+   toward the few codes the MLP starts producing, and the MLP in
+   turn collapses onto those same codes via the commitment loss.
+2. **RVQ summation increases bits but breaks manifold** — sum of
+   codes lands off the cloud's natural input-embedding distribution.
+
+### Take-away for the next sprint
+
+This catalogues *three* distinct failure modes for VQ-style IR with
+a frozen 1B cloud:
+
+1. Naive VQ at K=32: low effective bits → output mode-collapses on
+   single attractor.
+2. RVQ-summed at K=32: enough effective bits, but sum is
+   off-manifold → output degenerates into spam.
+3. Single VQ + warmup + high commit: same as (1) — warmup head start
+   is reabsorbed.
+
+The natural next moves are *not* incremental VQ tweaks; they
+require a different attack on the channel:
+
+- **FSQ (Finite Scalar Quantization)** — Mentzer et al. 2023.
+  Per-dim independent quantization to a fixed scalar set; codebook
+  is implicit and never collapses. Expected cleaner bandwidth /
+  utilisation tradeoff.
+- **Quantization-aware IR (no VQ)** — keep continuous MLP, but
+  transmit as int8/int4 with QAT. Captures the wire-compression
+  story without the on-manifold/utilisation tradeoffs.
+- **Partial cloud finetune** — drops the frozen-cloud constraint,
+  trains the cloud's input-embedding-adjacent layers to accept
+  off-manifold prefixes. Most likely to actually work, but loses
+  the "ship one adapter" deployment story.
+- **Bigger base** — A100 + 27B cloud. The 1B's input-embedding
+  manifold is the binding constraint; a 27B has substantially more
+  representational capacity to absorb a noisy prefix without mode
+  collapse.
+
+Single-VQ artifacts (this run):
+
+- `final_singlevq_warmup.pt` — step-3000 checkpoint
+- `v15_xmachine_singlevq_warmup.json` — bench JSON
+- `v15_train_singlevq_warmup.log` — training trace
 
 ## Artifacts
 
