@@ -18,13 +18,15 @@ Our contributions:
 
 ## 2. Related Work
 
-**Soft prompt tuning.** Prefix tuning (Li & Liang, 2021) and prompt tuning (Lester et al., 2021) optimize continuous vectors prepended to frozen LLM inputs. These methods operate within a single model; cross-model prompt transfer remains largely unexplored.
+**Soft prompt tuning.** Prefix tuning (Li & Liang, 2021) and prompt tuning (Lester et al., 2021) optimize continuous vectors prepended to frozen LLM inputs. These methods operate within a single model; cross-model latent transfer is a recent and active line of work (see **Cross-model latent transfer** below) rather than an open frontier — we position our study relative to it, not as its originator.
 
 **Knowledge distillation.** Hinton et al. (2015) introduced teacher-student frameworks. Recent work extends to heterogeneous architectures (Jiao et al., 2020), but typically trains the student model rather than a fixed bridge.
 
 **Speculative decoding.** Leviathan et al. (2023) use a small draft model to accelerate a large verifier. This operates within the same model family and optimizes latency, not cross-model semantic transfer.
 
-**Edge-cloud split inference.** Matsubara et al. (2022) survey split computing for DNNs, primarily in vision. LLM-specific edge-cloud architectures remain nascent. The closest work is BLIP-2 (Li et al., 2023), which bridges a frozen vision encoder to a frozen LLM via a trainable Q-Former — our architecture adapts this pattern to text-to-text cross-model transfer.
+**Edge-cloud split inference.** Matsubara et al. (2022) survey split computing for DNNs, primarily in vision. BLIP-2 (Li et al., 2023) bridges a frozen vision encoder to a frozen LLM via a trainable Q-Former; our architecture adapts that frozen-both-models, train-only-the-bridge pattern, but to text-to-text cross-model transfer.
+
+**Cross-model latent transfer (closest prior art).** The specific setup we study — freeze both models, train only a bridge that turns one frozen LLM's latent into representation-space input for another frozen LLM — has direct, published precedents that predate this work. **Cache-to-Cache** (C2C; ICLR 2026, arXiv:2510.03215) trains a projector that fuses a frozen source model's KV-cache into a frozen target model, reporting 3–5 points over text-based communication. **xRAG** (Cheng et al., NeurIPS 2024, arXiv:2405.13792) projects a frozen retriever's embedding into a frozen LM's representation space through a single trainable modality bridge. Our contribution is therefore **not** the bridge concept itself but (i) an empirical characterization of its failure modes for edge→cloud text routing (mode collapse under instruction tuning; entity-level information loss), and (ii) a *dual-channel* design that ships an auditable JSON alongside the optional latent. We note (ii) is a hypothesis, not a demonstrated win, and may be a liability where the latent cannot be audited. We do not claim to beat C2C/xRAG; we have not yet compared against them, and doing so is the central experiment this line of work needs.
 
 **Model routing.** Routing approaches (Jiang et al., 2024; Ong et al., 2024) select which model to query based on input characteristics. Our work differs in that the edge model doesn't select a model but rather encodes the query into a continuous representation that steers generation.
 
@@ -145,6 +147,8 @@ The 50% entity match achieved by E2B base demonstrates that meaningful cross-mod
 
 ## References
 
+- Cheng, X., et al. (2024). xRAG: Extreme context compression for retrieval-augmented generation with one token. NeurIPS. arXiv:2405.13792.
+- [authors TBD — verify] (2026). Cache-to-Cache: Direct semantic communication between large language models. ICLR. arXiv:2510.03215; code: github.com/thu-nics/C2C. *(author list not yet confirmed; fill in before submission)*
 - Hinton, G., Vinyals, O., & Dean, J. (2015). Distilling the knowledge in a neural network. arXiv:1503.02531.
 - Jiao, X., et al. (2020). TinyBERT: Distilling BERT for natural language understanding. EMNLP.
 - Lester, B., Al-Rfou, R., & Constant, N. (2021). The power of scale for parameter-efficient prompt tuning. EMNLP.

@@ -9,7 +9,9 @@ Edge-cloud semantic router for the Gemma 4 family. Two coexisting wire formats:
 - **V1.5** — adds a dense embedding bridge: the edge model emits a
   4096-d vector packed into the schema, and a trainable soft-prompt MLP
   prepends K=8 token embeddings to a frozen cloud LM at inference.
-  BLIP-2 Q-Former pattern; only `~50M` trainable params.
+  BLIP-2 / xRAG-style frozen-both-models bridge; **~318M** trainable params
+  (~16M projection + ~302M soft-prompt MLP). *(The earlier `~50M` figure was
+  wrong — see `docs/v15-architecture.md` for the breakdown.)*
 
 V1.5 lives behind a feature flag (`V15_ENABLED`); V1 is the default and is
 unaffected.
@@ -153,6 +155,38 @@ Setting `embedding_b64=null` makes a V1.5 payload behaviourally identical to
 V1.0, so the cloud side can ship the adapter and roll the bridge in
 gradually.
 
+### Positioning & prior art (read before claiming novelty)
+
+The "freeze both models, train only a small bridge that turns one model's
+latent into soft-prompt/representation input for another" idea is **not novel**
+to this project. It is an active, published line of work:
+
+- **Cache-to-Cache (C2C)** — Direct semantic communication between LLMs via a
+  trained projector that fuses a frozen source model's KV-cache into a frozen
+  target model. ICLR 2026, arXiv:2510.03215, code `thu-nics/C2C`. This is the
+  closest prior art to V1.5's latent bridge and reports beating text-based
+  communication by 3–5 points.
+- **xRAG** — Projects a frozen retriever's document embedding into a frozen
+  LM's representation space via a single trainable modality bridge. NeurIPS
+  2024, arXiv:2405.13792.
+- BLIP-2 (already cited) established the frozen-encoder → frozen-LM Q-Former
+  bridge for vision→text.
+
+**What this means for V1.5:** treat it as a **research track**, not a product
+differentiator, and benchmark it *against* C2C / xRAG rather than presenting it
+as new. The one angle that is plausibly distinctive — a **dual channel** that
+ships an auditable, redactable JSON *alongside* an optional opaque latent — is a
+hypothesis to test, and may be a liability for privacy/compliance buyers (you
+cannot audit a latent you cannot read; Apple PCC deliberately chose text-only).
+The honest open question (see `research/paper-soft-prompt-router/draft.md`):
+does JSON+latent actually beat JSON-only and a FrugalGPT-style cascade? The
+repo's own findings so far say the bridge behaves as a lossy topic router, not
+a faithful encoder.
+
+V1.0's routing + privacy-masking are likewise standard (cf. RouteLLM,
+FrugalGPT; PRISM for masking). V1.0's value proposition is **clean,
+observable, self-hostable, sovereign** edge-cloud routing — not novelty.
+
 ## Training & inference
 
 The V1.5 edge encoder and cloud adapter are real PyTorch + HuggingFace
@@ -294,8 +328,10 @@ http://localhost:8080`. Not exercised in CI.
 The frozen Gemma 4 base models stay fixed; only `EdgeEncoder.projection`
 (`Linear(base_hidden, embedding_dim)`) and `SoftPromptAdapter.mlp`
 (`Linear(edge_dim, edge_dim*2) -> GELU -> Linear(edge_dim*2,
-prompt_tokens*cloud_hidden)`) are trainable (~50M params total at the
-4096/8 V1.5 defaults). BLIP-2 Q-Former pattern.
+prompt_tokens*cloud_hidden)`) are trainable (**~318M** params total at the
+4096/8 V1.5 defaults: ~16M projection + ~302M MLP, the latter dominated by the
+`8192 -> 8*4096` output layer). BLIP-2 Q-Former pattern; full breakdown in
+`docs/v15-architecture.md`. *(A previous `~50M` figure here was an error.)*
 
 Mock mode (CI / local dev, no GPU, `tiny-random-LlamaForCausalLM`):
 
