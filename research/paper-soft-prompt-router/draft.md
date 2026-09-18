@@ -113,7 +113,7 @@ Doubling K from 32 to 64 (with gemma-3-1b-it edge) does not improve entity match
 | gemma3:4b distilled | 5000 | 27 chars | 12.5% (8-prompt) |
 | a stronger teacher model | 1185 | 546 chars | 34% (100-prompt) |
 
-Despite 4× fewer samples, Higher-quality teacher data with longer, information-rich responses produces substantially better soft prompt training signal.
+Despite 4× fewer samples, higher-quality teacher data with longer, information-rich responses produces substantially better soft prompt training signal.
 
 ## 5. Analysis
 
