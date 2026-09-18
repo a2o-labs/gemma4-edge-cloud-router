@@ -160,7 +160,7 @@ Total wire-input compression vs the buggy state: **2256 → 32 = 70.5×.**
 
 ## Reproduce
 
-Artifacts are pinned at `~/v15-progress/2026-05-08/` on bench-client
+Artifacts are pinned at `~/v15-progress/2026-05-08/` on the training workstation (not in this repository)
 (`final.pt` 178 MB, `v15_distilled_5000.jsonl`, training log,
 five cross-machine bench JSONs). Re-run on a fresh L4:
 

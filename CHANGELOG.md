@@ -4,6 +4,16 @@ All notable changes to gemma4-router are documented here.
 
 ## Unreleased
 
+### Open-sourcing (2026-09-19)
+
+- Research drafts unrelated to the router — `research/erdos-ramsey/`,
+  `research/p0-compiler-ir-retrieval/`, `research/verification-gap/` and
+  `docs/paper-compiler-ir-retrieval.md` — were moved out of this repository.
+  Changelog entries below that mention them are kept as history.
+- Private hostnames and tailnet addresses redacted in `bench/`, `docs/` and this
+  file (see the note at the top of `bench/README.md`); measurements unchanged.
+- `LICENSE` added (MIT, matching `pyproject.toml`); package author set to A2O Labs.
+
 ### V1.5 bench + production fixes
 
 - `bench/v15_split_xmachine_bench.py` + `bench/a100_cloud_server.py` +

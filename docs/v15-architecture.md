@@ -32,7 +32,7 @@ breaks everything.
 V1.5: keep the JSON for control, add the embedding for fidelity. Both signals
 are ablatable: setting `embedding_b64=null` falls back to V1 behaviour;
 setting `action_graph=null` lets the cloud lean entirely on the embedding.
-This is what the fleet (TL data, SRE infra, redacted training) converged on
+This is what the team converged on
 in `cc.fleet.coord.v15-final` (NATS topic).
 
 ## Component diagram
@@ -97,8 +97,8 @@ fall through to V1.0 behaviour.
 ## Training pipeline
 
 Ground truth: paired examples `(input_text, target_text, task_type,
-complexity)`, harvested by TL from production logs (rotated for privacy,
-with PII red-team filter applied — see SRE compliance note).
+complexity)`, harvested from production logs (rotated for privacy,
+with a PII red-team filter applied).
 
 ```
    train.jsonl
@@ -126,11 +126,11 @@ with PII red-team filter applied — see SRE compliance note).
 
 Trainable param budget: Linear[4096 x 4096] (16 M) + MLP[4096 x 8192 +
 8192 x 32768] (~302 M). Total ~318 M trainable on top of two frozen Gemma4
-bases. Fits a single L4 24GB with bf16 + grad-checkpointing per the SRE
+bases. Fits a single L4 24GB with bf16 + grad-checkpointing per the deployment
 sizing memo.
 
 Hyperparameters in `training/train_v15.py` are placeholders. Real sweep
-will be redacted's responsibility once TL hands over the harvested pairs.
+will follow once the harvested pairs are available.
 
 ## Evaluation
 
@@ -180,8 +180,8 @@ cloud_forwarder,...}.py` are untouched.
 ## Open questions deferred to fleet
 
 - Embedding privacy: does the 4096-d vector leak more than the JSON?
-  SRE has flagged this for the next compliance review; until cleared,
+  This is flagged for the next compliance review; until cleared,
   embedding emission is gated by a config flag (default off in production).
-- MLP K: 8 vs 4 vs 16 — to be settled empirically by redacted post-training.
+- MLP K: 8 vs 4 vs 16 — to be settled empirically post-training.
 - vLLM soft-prompt support: vLLM 0.19 needs `--enable-prefix-caching` plus
-  a custom prompt-embedding adapter; SRE will validate on the GPU node.
+  a custom prompt-embedding adapter; to be validated on the GPU node.

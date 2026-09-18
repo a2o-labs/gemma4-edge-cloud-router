@@ -2,13 +2,13 @@
 """V1.5 cross-machine split bench: edge on L4, cloud on A100.
 
 Pipeline per prompt:
-    bench-client --(http)--> L4 EdgeEncoder (gemma-3-1b-it fp16) --(http)--> A100 SoftPromptAdapter (gemma-3-27b-it 4bit nf4) --> response
+    bench client --(http)--> L4 EdgeEncoder (gemma-3-1b-it fp16) --(http)--> A100 SoftPromptAdapter (gemma-3-27b-it 4bit nf4) --> response
 
 Measures end-to-end and per-stage latency, decomposing into
 encode_compute_ms (server-reported), forward_compute_ms, network_ms
 (round-trip minus server work), total_ms.
 
-Run from bench-client (any host on the tailnet that can reach both
+Run from the bench client (any host on the tailnet that can reach both
 endpoints).
 """
 from __future__ import annotations
@@ -51,8 +51,8 @@ def stats(xs: list[float]) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--edge-url", default="http://<edge-host>:8002")
-    p.add_argument("--cloud-url", default="http://<cloud-host>:8001")
+    p.add_argument("--edge-url", default="http://localhost:8002")
+    p.add_argument("--cloud-url", default="http://localhost:8001")
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument(
         "--prompts",

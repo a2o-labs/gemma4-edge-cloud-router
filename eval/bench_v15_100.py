@@ -18,7 +18,7 @@ import json, re, sys, time, argparse, torch
 from pathlib import Path
 from collections import Counter
 
-sys.path.insert(0, "/workspace/src")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 BENCH_PROMPTS = [

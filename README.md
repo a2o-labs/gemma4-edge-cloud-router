@@ -122,9 +122,9 @@ V1.5 functional end-to-end:
 
 External dependencies still pending integration:
 
-- A100 80GB cloud target for `SoftPromptAdapter` — SRE-owned (vast.ai).
-- Paired training data — TL data-harvest in the external-pipeline repo.
-- Liqo NamespaceOffloading on the `ai-infra` namespace — SRE follow-up.
+- A100 80GB cloud target for `SoftPromptAdapter` — rented (vast.ai).
+- Paired training data — an external data-harvest pipeline, not in this repo.
+- Liqo NamespaceOffloading on the `ai-infra` namespace — cluster-side follow-up, not configured here.
 
 See `bench/README.md` and `docs/v15-architecture.md` for hardware specs and
 the V2.5 codebook upgrade gate.
@@ -169,7 +169,7 @@ schema or routing layer.
   trainable `nn.Linear` projection head trains on the same L4 since the
   base is frozen.
 - **Production cloud**: Gemma 4 31B-it (frozen) on an A100 80GB
-  (vast.ai per the SRE deployment plan). Only the soft-prompt MLP is
+  (vast.ai, rented). Only the soft-prompt MLP is
   trainable.
 - **Install training deps**: `uv pip install -e '.[training]'` pulls
   torch, transformers, accelerate, peft.

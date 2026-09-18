@@ -345,7 +345,7 @@ Single-VQ artifacts (this run):
 
 ## Artifacts
 
-Pinned at `~/v15-progress/2026-05-08/` on bench-client:
+Pinned at `~/v15-progress/2026-05-08/` on the training workstation (not in this repository):
 
 - `final_xtok.pt` — cross-tokenizer checkpoint (296 MB; gemma 1B
   projection + adapter MLP for Qwen 3B output dim)

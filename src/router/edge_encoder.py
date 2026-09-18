@@ -258,7 +258,7 @@ class EdgeEncoder:
     def classify(self, text: str) -> Literal["light", "heavy"]:
         """Length-based placeholder classifier.
 
-        Production classifier lives in external-pipeline data-harvest (TL's domain);
+        Production classifier lives in an external data-harvest pipeline;
         this is a deterministic stand-in so the schema envelope can be
         populated without a separate model load.
         """

@@ -1,5 +1,10 @@
 # bench/
 
+> **Redaction note (2026-09-19, before open-sourcing).** Hostnames and tailnet addresses in this
+> directory — in this README and in the three `*_2026-05-08.json` records — were replaced by
+> `l4-edge-1` / `l4-edge-2` / `<edge-host>` / `<cloud-host>` / `bench client`. `<edge-host>` was an
+> NVIDIA L4 on a private tailnet and `<cloud-host>` a rented A100; nothing else in the records changed.
+
 Real-weight benchmarks and smoke tests for the V1.5 router pipeline.
 
 ## Status
@@ -286,7 +291,7 @@ across two physical hosts on the tailnet:
   nf4; exposes `POST /v15/forward {schema_json, max_new_tokens}` →
   decoded response + token counts.
 - The bench script (`bench/v15_split_xmachine_bench.py`) lives on the
-  tailnet client (here `<user>`) and chains
+  tailnet client (here the bench client host) and chains
   `L4 /v15/encode` → `A100 /v15/forward` per prompt, decomposing
   latency into compute (server-reported) vs network (RTT − compute).
 
@@ -298,7 +303,7 @@ Hardware:
   Driver 595.71.05, kernel `6.1.0-45-cloud-amd64` (rebuilt nvidia dkms
   for the new kernel before this run).
 - Cloud: NVIDIA A100-SXM4-80GB on vast.ai (Japan host).
-- Both hosts on the same tailnet; bench client on bench-client in
+- Both hosts on the same tailnet; bench client on a separate tailnet host in
   Tokyo. Each prompt = 1 L4 RPC + 1 A100 RPC.
 
 Models:
@@ -346,9 +351,9 @@ sha256-keyed by prompt and intercepts before the GPU.
 
 | stage              | p50      | what it includes                                         |
 |--------------------|----------|----------------------------------------------------------|
-| encode network     | 13.6 ms  | tailnet RTT + JSON serdes (`L4 ↔ bench-client`)           |
+| encode network     | 13.6 ms  | tailnet RTT + JSON serdes (`L4 ↔ bench client`)           |
 | encode compute     | 57.1 ms  | tokenize + forward + projection on L4 (warm GPU)         |
-| forward network    | 102.5 ms | tailnet RTT + 3.3 KB schema_json upload (`A100 ↔ bench-client`) |
+| forward network    | 102.5 ms | tailnet RTT + 3.3 KB schema_json upload (`A100 ↔ bench client`) |
 | forward compute    | 6704 ms  | 64-token greedy generate on 27B 4-bit nf4, ~2250 in tok |
 | **end-to-end p50** | **6878 ms** | one full split round-trip                            |
 
@@ -392,7 +397,7 @@ a working `.venv` (torch 2.4.1+cu124, transformers 4.55.4, bnb 0.49.2,
 fastapi, uvicorn) plus `/dev/shm/hf-cache` containing `gemma-3-27b-it`:
 
 ```bash
-ssh root@<cloud-host>
+ssh <user>@<cloud-host>
 cd /opt/v15-cloud-adapter/repo
 export HF_HOME=/dev/shm/hf-cache HF_HUB_CACHE=/dev/shm/hf-cache/hub \
        PYTHONPATH=/opt/v15-cloud-adapter/repo/src

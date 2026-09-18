@@ -129,7 +129,7 @@ class SoftPromptAdapter:
             raise RuntimeError(
                 f"Failed to load cloud model '{cloud_model_name}'. Hint: "
                 f"production deployment runs Gemma 4 31B on A100 80GB "
-                f"(vast.ai per SRE plan) with HF_TOKEN. Underlying error: {e}"
+                f"(a rented A100) with HF_TOKEN. Underlying error: {e}"
             ) from e
 
         if quantization_config is None:

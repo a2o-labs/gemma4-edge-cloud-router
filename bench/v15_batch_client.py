@@ -30,8 +30,8 @@ def get_json(url: str, timeout: float = 10.0):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--edge-url", default="http://<edge-host>:8002")
-    p.add_argument("--cloud-url", default="http://<cloud-host>:8001")
+    p.add_argument("--edge-url", default="http://localhost:8002")
+    p.add_argument("--cloud-url", default="http://localhost:8001")
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 2, 4, 8])
     p.add_argument("--trials", type=int, default=3)
